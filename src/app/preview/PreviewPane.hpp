@@ -7,8 +7,10 @@
 
 #include <memory>
 
+class QFrame;
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 class QStackedWidget;
 class QTabWidget;
 class QTreeWidget;
@@ -35,9 +37,16 @@ public:
     /// 0 Preview, 1 Structure, 2 Hex, 3 Properties.
     void setCurrentTab(int tab);
 
+    /// Shows the red "not backed up" banner for `fileName`; an empty name hides it.
+    void setBackupWarning(const QString& fileName);
+    /// Disables the banner's button while a backup is running.
+    void setBackupInProgress(bool running);
+
 signals:
     /// The current node's preview has been fully populated.
     void previewReady();
+    /// The user clicked "Back Up Now" on the banner.
+    void backupRequested();
 
 private:
     enum Tab { PreviewTab, StructureTab, HexTab, PropertiesTab };
@@ -54,6 +63,9 @@ private:
 
     QLabel* m_title;
     QLabel* m_subtitle;
+    QFrame* m_banner;
+    QLabel* m_bannerText;
+    QPushButton* m_bannerButton;
     QTabWidget* m_tabs;
     QStackedWidget* m_previewStack;
     QLabel* m_message;

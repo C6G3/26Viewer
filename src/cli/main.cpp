@@ -65,7 +65,10 @@ Usage:
   26viewer-cli list    <archive|game dir> [filter] List files (optional substring filter)
   26viewer-cli verify  <archive|game dir>         Decompress every file and report errors
   26viewer-cli extract <archive|game dir> <out> [filter]
-                                                  Extract files, keeping folder structure)");
+                                                  Extract files, keeping folder structure
+  26viewer-cli replace <archive> <entry path> <new file>
+                                                  Replace one file inside an archive (keeps its name)
+  26viewer-cli backup  <file>                     Save the original as <file>.bak (once; never overwritten))");
     return 2;
 }
 
@@ -215,6 +218,61 @@ int cmdExtract(const fs::path& target, const fs::path& outDir, const std::string
     return failed == 0 ? 0 : 1;
 }
 
+int cmdReplace(const fs::path& archive, const std::string& entryPath, const fs::path& newFile)
+{
+    Session s;
+    auto node = mount(s, archive);
+    if (!node) {
+        std::println(stderr, "error: {}", node.error().message);
+        return 1;
+    }
+    const std::string wanted = toLower(normalizeArchivePath(entryPath));
+    const VfsNode* target = nullptr;
+    for (const VfsNode* f : Vfs::collectFiles(**node))
+        if (toLower(f->pathRelativeTo(*node)) == wanted)
+            target = f;
+    if (!target) {
+        std::println(stderr, "error: '{}' not found in the archive", entryPath);
+        return 1;
+    }
+    if (extensionOf(target->name()) != extensionOf(newFile)) {
+        std::println(stderr, "error: file types differ (.{} vs .{})", extensionOf(target->name()), extensionOf(newFile));
+        return 1;
+    }
+    auto data = readFile(newFile);
+    if (!data) {
+        std::println(stderr, "error: {}", data.error().message);
+        return 1;
+    }
+    auto report = s.vfs.replace(*target, *data);
+    if (!report) {
+        std::println(stderr, "error: {}", report.error().message);
+        return 1;
+    }
+    std::println("replaced {} ({} -> {} bytes, stored as {}, {} bytes)", target->virtualPath(), target->size(),
+                 data->size(), report->storage, report->storedSize);
+    if (report->backup.empty())
+        std::println(stderr, "note: no backup exists; run `26viewer-cli backup <archive>` before editing to keep the original");
+    else
+        std::println("backup: {}", toUtf8(report->backup));
+    for (const auto& w : report->warnings)
+        std::println(stderr, "note: {}", w);
+    return 0;
+}
+
+int cmdBackup(const fs::path& file)
+{
+    std::error_code ec;
+    const bool existed = fs::exists(backupPathFor(file), ec);
+    auto backup = ensureBackup(file);
+    if (!backup) {
+        std::println(stderr, "error: {}", backup.error().message);
+        return 1;
+    }
+    std::println("{} {}", existed ? "backup already exists:" : "backed up to", toUtf8(*backup));
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -237,5 +295,9 @@ int main(int argc, char** argv)
         return cmdVerify(toPath(args[2]));
     if (cmd == "extract" && args.size() >= 4)
         return cmdExtract(toPath(args[2]), toPath(args[3]), arg(4));
+    if (cmd == "backup")
+        return cmdBackup(toPath(args[2]));
+    if (cmd == "replace" && args.size() >= 5)
+        return cmdReplace(toPath(args[2]), args[3], toPath(args[4]));
     return usage();
 }

@@ -49,4 +49,33 @@ Result<ByteBuffer> readFile(const std::filesystem::path& path, std::uint64_t lim
 /// Writes a buffer to disk, creating parent directories as needed.
 Result<void> writeFile(const std::filesystem::path& path, ByteSpan data);
 
+/// Makes a file writable for the lifetime of the object, then restores its
+/// read-only flag. Game installs often mark their archives read-only.
+class ScopedWritable {
+public:
+    explicit ScopedWritable(std::filesystem::path path);
+    ~ScopedWritable();
+    ScopedWritable(const ScopedWritable&) = delete;
+    ScopedWritable& operator=(const ScopedWritable&) = delete;
+
+    /// Error if the file could not be made writable.
+    [[nodiscard]] const Result<void>& status() const noexcept { return m_status; }
+
+private:
+    std::filesystem::path m_path;
+    bool m_wasReadOnly = false;
+    Result<void> m_status;
+};
+
+/// Where the untouched original of `file` is kept: "<file>.bak" beside it.
+[[nodiscard]] std::filesystem::path backupPathFor(const std::filesystem::path& file);
+
+/// Copies `file` to its backup path unless a backup already exists (an
+/// existing backup is the true original and is never overwritten).
+/// Returns the backup path.
+Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file);
+
+/// Copies the backup back over `file`. The file must not be open elsewhere.
+Result<void> restoreBackup(const std::filesystem::path& file);
+
 } // namespace viewer

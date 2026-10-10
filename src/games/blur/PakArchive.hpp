@@ -21,9 +21,15 @@ public:
     PropertyList describeEntry(std::size_t index) const override;
     PropertyList describe() const override;
 
+    bool canReplace() const noexcept override { return true; }
+    /// Appends the newly encoded data at the end of the archive and re-points
+    /// the entry's record at it (other entries are untouched).
+    Result<ReplaceReport> replace(std::size_t index, ByteSpan data) const override;
+
 private:
     /// Format-specific data kept alongside each public ArchiveEntry.
     struct Slot {
+        std::uint64_t entryOffset = 0; ///< File offset of this entry's table record.
         std::uint64_t dataOffset = 0;
         std::uint32_t storedSize = 0; ///< v2: stored size; v1: zlib size after the u32 prefix.
         std::uint32_t hash = 0;
@@ -37,6 +43,8 @@ private:
     PakArchive() = default;
     Result<Storage> detectStorage(const Slot& slot, std::uint64_t size) const;
     Result<ByteBuffer> readChunked(ByteSpan raw, std::size_t size) const;
+    Result<ByteBuffer> encodeLike(const Slot& slot, std::uint64_t originalSize, ByteSpan data,
+                                  std::string& storageName) const;
 
     std::unique_ptr<RandomAccessFile> m_file;
     std::vector<ArchiveEntry> m_entries;

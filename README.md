@@ -25,6 +25,19 @@ system, image decoders, the UI — is shared by every future game module.
 - **Extraction** of a selection or everything, on a background thread with
   progress and cancel; paths are sanitised so archives can never write outside
   the chosen folder.
+- **Edit Mode** (like OpenIV): off at every start; turning it on (`Ctrl+M`)
+  asks for confirmation and shows a red **EDIT MODE** badge. Only then can you:
+  - **Replace assets** with your own files — *Edit ▸ Replace…* (`Ctrl+R`), the
+    toolbar button, or drag a file from Explorer onto an item. The file type must
+    match; the name inside the archive never changes.
+  - **Back up** explicitly: items in an archive without a backup show a red
+    *"not backed up"* banner with a **Back Up Now** button (saves
+    `<archive>.bak`). Replacing offers *Back Up & Replace*; nothing is backed up
+    behind your back.
+  - **Restore Original** from the backup.
+- **Picks up where you left off**: the last game (and selected file) reopens at
+  start-up. Toggle with *File ▸ Reopen Last Game at Startup*. Settings live in
+  `%APPDATA%\26Viewer\26Viewer.ini`.
 - **Modern Windows UI**: Windows 11 style, light/dark mode that follows the OS
   *live* (or forced via *View ▸ Theme*), Fluent icons, dark title bar,
   per-monitor high-DPI.
@@ -34,7 +47,7 @@ system, image decoders, the UI — is shared by every future game module.
 
 | Game | Archives | Previews |
 |---|---|---|
-| Blur (PC) | `cache/*.pak` (2KAP v1 & v2: stored, zlib, chunked deflate) | `.texture`, `.dds`, text, chunk structure of `.model`/`.level`/`.font`… |
+| Blur (PC) | `cache/*.pak` (2KAP v1 & v2: stored, zlib, chunked deflate) — read **and replace** | `.texture`, `.dds`, text, chunk structure of `.model`/`.level`/`.font`… |
 
 Format notes live in [docs/formats/](docs/formats/).
 
@@ -60,10 +73,17 @@ Run `build/release/bin/26Viewer.exe` (or `dist/release/26Viewer.exe`).
 26viewer-cli list    "F:/Games/BLUR" texture
 26viewer-cli verify  "F:/Games/BLUR"
 26viewer-cli extract "F:/Games/BLUR/cache/root.pak" out/ graphics/textures
+26viewer-cli backup  "F:/Games/BLUR/cache/root.pak"
+26viewer-cli replace "F:/Games/BLUR/cache/root.pak" graphics/textures/flags/amboyflag.texture my_flag.texture
 ```
 
+> **Modding note (Blur):** replaced files are written correctly, but the game's
+> per-file checksum is only understood for files up to 32 KiB, and
+> `gamedata*.pak` are signed (`.sig`). If the game rejects a modified archive,
+> those are the likely reasons — use *Restore Original* to undo.
+
 The GUI also accepts a path (`26Viewer.exe F:\Games\BLUR`), and
-`--select <virtual path> --theme dark --screenshot out.png` for scripted UI captures.
+`--select <virtual path> --theme dark --edit-mode --screenshot out.png` for scripted UI captures.
 
 ## Project layout
 
@@ -79,7 +99,9 @@ The GUI also accepts a path (`26Viewer.exe F:\Games\BLUR`), and
 │  └─ app/           Qt 6 desktop application
 ├─ resources/        icons
 ├─ tests/            Catch2 unit tests (synthetic archives, no game data needed)
-├─ tools/research/   Python prototypes used to reverse-engineer formats
+├─ tools/
+│  ├─ research/      Python prototypes used to reverse-engineer formats
+│  └─ icongen/       build-time SVG → .ico renderer for the .exe icon
 ├─ docs/             architecture, building, roadmap, format specs
 ├─ build/            (generated, git-ignored)
 └─ dist/             (generated, git-ignored) deployable app folders

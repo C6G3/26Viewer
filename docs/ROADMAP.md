@@ -33,9 +33,15 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 
 1. [x] Choose a license, add `LICENSE` (MIT)
 2. [x] `git init`, first commit, push to https://github.com/C6G3/26Viewer
-   - [ ] Confirm the CI workflow (`.github/workflows/build.yml`) passes on GitHub Actions
-3. [ ] Windows resources: `.ico` app icon + VERSIONINFO via `app.rc`
-4. [ ] Recent games / recent archives menu (File ▸ Recent)
+   - [x] Confirm the CI workflow (`.github/workflows/build.yml`) passes on GitHub Actions
+3. [x] Windows resources: `.ico` app icon (rendered from SVG at build time by `tools/icongen`) + VERSIONINFO
+4. [x] Reopen the last game + selection at start-up (settings in `%APPDATA%\26Viewer\26Viewer.ini`)
+   - [ ] Recent games / recent archives menu (File ▸ Recent)
+4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
+   - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
+   - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups
+   - [ ] Test replaced Blur files in-game (≤ 32 KiB files, > 32 KiB files, signed gamedata archives)
+   - [ ] Batch replace: drop a folder whose layout mirrors the archive
 5. [ ] Status-bar breadcrumb and "Go to path…" (`Ctrl+L`) using `MainWindow::selectPath`
 6. [ ] Hex view: selection, copy as hex/C array, go-to-offset, find bytes
 7. [ ] Image view: channel toggles (R/G/B/A), mip selector, export as PNG
@@ -52,7 +58,9 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 4. [ ] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia)
 5. [ ] Data tables (`.bin`, `.loc`, `.xt`) → table view
 6. [ ] `.bpr` (`2RZB`) UI packs, `.ipf` layouts, `.pf` fonts
-7. [ ] Identify the PAK `hash`/digest/name-hash algorithms (enables repacking)
+7. [ ] PAK hashes: digest = SHA-1(stored) ✅, content hash ≤ 32 KiB = ~CRC-32 ✅; still unknown: content hash for
+   larger files, name hash (needed to **add new files** to an archive)
+8. [ ] Add new files to archives (full repack: grow name table + file table) once the name hash is known
 
 ## Phase 5 — Multi-game platform
 

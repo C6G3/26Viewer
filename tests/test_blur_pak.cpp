@@ -189,6 +189,57 @@ TEST_CASE("Blur PAK v1 (size-prefixed zlib)")
     checkArchive(buildPak(files, 1, 32), files, "v1.pak");
 }
 
+TEST_CASE("Replacing entries keeps names, encodings and the other files intact")
+{
+    for (const std::uint32_t stride : {40u, 64u}) {
+        DYNAMIC_SECTION("stride " << stride)
+        {
+            auto files = sampleFiles();
+            test::TempFile file("replace_" + std::to_string(stride) + ".pak", buildPak(files, 2, stride));
+
+            for (std::size_t i = 0; i < files.size(); ++i) {
+                auto pak = PakArchive::open(file.path);
+                REQUIRE(pak);
+                const auto replacement = test::sampleData(200 + 700 * i, static_cast<unsigned>(50 + i));
+                auto report = (*pak)->replace(i, replacement);
+                REQUIRE(report);
+                files[i].data = replacement;
+            }
+
+            auto pak = PakArchive::open(file.path);
+            REQUIRE(pak);
+            REQUIRE((*pak)->entries().size() == files.size());
+            for (std::size_t i = 0; i < files.size(); ++i) {
+                INFO(files[i].name);
+                CHECK((*pak)->entries()[i].path == "dir/" + files[i].name);
+                auto data = (*pak)->read(i);
+                REQUIRE(data);
+                CHECK(*data == files[i].data);
+            }
+            // Original encodings are preserved.
+            CHECK((*pak)->describeEntry(0)[0].value.starts_with("Stored"));
+            CHECK((*pak)->describeEntry(1)[0].value.starts_with("zlib"));
+            CHECK((*pak)->describeEntry(2)[0].value.starts_with("Chunked"));
+        }
+    }
+}
+
+TEST_CASE("Replacing in a v1 archive")
+{
+    std::vector<FileSpec> files{{"a.fxb", test::sampleData(4000, 9), Storage::Zlib},
+                                {"b.fxb", test::sampleData(100, 10), Storage::Zlib}};
+    test::TempFile file("replace_v1.pak", buildPak(files, 1, 32));
+    {
+        auto pak = PakArchive::open(file.path);
+        REQUIRE(pak);
+        REQUIRE((*pak)->replace(0, test::sampleData(9000, 11)));
+    }
+    auto pak = PakArchive::open(file.path);
+    REQUIRE(pak);
+    CHECK((*pak)->read(0).value() == test::sampleData(9000, 11));
+    CHECK((*pak)->read(1).value() == files[1].data);
+}
+
 TEST_CASE("Corrupt PAK files are rejected with an error")
 {
     auto bytes = buildPak(sampleFiles(), 2, 40);

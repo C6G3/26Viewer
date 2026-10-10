@@ -64,11 +64,29 @@ Entry (`stride` bytes):
 | 8 | u32 | uncompressed size |
 | 12 | u64 | FILETIME |
 | 20 | i64 | data offset in alignment units; **−1 = directory record** |
-| 28 | u32 | v2: hash — not CRC-32 of the data or of the stored bytes 🟡 |
+| 28 | u32 | v2: content hash = `~crc32(uncompressed data)` for files ≤ 32 KiB ✅; larger files use an unknown variant (not prefix/suffix/sampled/block-combined CRC) 🟡 |
 | 32 | u32 | v2: stored size |
 | 36 | u32 | stride 64 only: flags/zero 🟡 |
-| 40 | u8[20] | stride 64 only: digest — not SHA-1 of the data 🟡 |
-| stride−4 | u32 | name hash; the table is *not* sorted by it 🟡 |
+| 40 | u8[20] | stride 64 only: **SHA-1 of the stored (compressed) bytes** ✅ |
+| stride−4 | u32 | name hash — not CRC-32/FNV/djb2/sdbm/one-at-a-time of any path spelling tried; table not sorted by it ❓ |
+
+`gamedata.pak` / `gamedata_boot.pak` (the stride-64 archives) ship with
+128-byte `.sig` files, most likely RSA-1024 signatures over the table.
+
+### Writing (replace) ✅ (format) / 🟡 (game acceptance)
+
+`PakArchive::replace` keeps every other byte intact:
+
+1. Encode the new data the way the original entry was stored (stored / zlib /
+   64 KiB chunked raw deflate — every chunk deflated / v1 size-prefixed zlib).
+2. Append it at the next `alignment` boundary at the end of the file (the old
+   data stays, unused).
+3. Patch only that entry: size, FILETIME, offset, stored size, content hash
+   (`~crc32`), and for stride-64 archives the SHA-1 digest.
+
+The record is patched last, so an interrupted write leaves the archive
+pointing at the old data. Whether the game accepts files over 32 KiB (unknown
+hash variant) or modified signed archives has **not been tested in-game yet**.
 
 ### Data encodings
 

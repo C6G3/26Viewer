@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -125,6 +126,90 @@ Result<void> writeFile(const std::filesystem::path& path, ByteSpan data)
     out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     if (!out)
         return fail(ErrorCode::Io, "write failed for '{}'", displayPath(path));
+    return {};
+}
+
+ScopedWritable::ScopedWritable(std::filesystem::path path) : m_path(std::move(path))
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const auto perms = fs::status(m_path, ec).permissions();
+    if (ec) {
+        m_status = fail(ErrorCode::Io, "cannot access '{}': {}", displayPath(m_path), ec.message());
+        return;
+    }
+    if ((perms & fs::perms::owner_write) == fs::perms::none) {
+        // On Windows this clears the FILE_ATTRIBUTE_READONLY flag.
+        fs::permissions(m_path, fs::perms::owner_write, fs::perm_options::add, ec);
+        if (ec)
+            m_status = fail(ErrorCode::Io, "'{}' is read-only and could not be unlocked: {}", displayPath(m_path),
+                            ec.message());
+        else
+            m_wasReadOnly = true;
+    }
+}
+
+ScopedWritable::~ScopedWritable()
+{
+    if (m_wasReadOnly) {
+        std::error_code ec;
+        std::filesystem::permissions(m_path, std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::remove, ec);
+    }
+}
+
+std::filesystem::path backupPathFor(const std::filesystem::path& file)
+{
+    auto backup = file;
+    backup += ".bak";
+    return backup;
+}
+
+Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file)
+{
+    namespace fs = std::filesystem;
+    const fs::path backup = backupPathFor(file);
+    std::error_code ec;
+    if (fs::exists(backup, ec))
+        return backup;
+
+    // Copy to a temporary name first so an interrupted copy never looks like a valid backup.
+    fs::path temp = backup;
+    temp += ".tmp";
+    fs::copy_file(file, temp, fs::copy_options::overwrite_existing, ec);
+    if (!ec)
+        fs::rename(temp, backup, ec);
+    if (ec) {
+        fs::remove(temp, ec);
+        return fail(ErrorCode::Io, "could not back up '{}': {}", displayPath(file), ec.message());
+    }
+    return backup;
+}
+
+Result<void> restoreBackup(const std::filesystem::path& file)
+{
+    namespace fs = std::filesystem;
+    const fs::path backup = backupPathFor(file);
+    std::error_code ec;
+    if (!fs::exists(backup, ec))
+        return fail(ErrorCode::NotFound, "no backup exists for '{}'", displayPath(file));
+    const ScopedWritable writable(file);
+    if (!writable.status())
+        return std::unexpected(writable.status().error());
+
+    // Stream copy rather than CopyFile: it coexists with read handles that
+    // other parts of the app may still hold on the archive.
+    std::ifstream in(backup, std::ios::binary);
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!in || !out)
+        return fail(ErrorCode::Io, "could not restore '{}' (in use?)", displayPath(file));
+    std::vector<char> buffer(4 << 20);
+    while (in) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        out.write(buffer.data(), in.gcount());
+    }
+    if (!out || in.bad())
+        return fail(ErrorCode::Io, "could not restore '{}': write failed", displayPath(file));
     return {};
 }
 

@@ -19,6 +19,7 @@ struct Options {
     QString screenshot;
     QString theme;
     int tab = -1;
+    bool editMode = false;
 };
 
 Options parseArguments(const QApplication& app)
@@ -40,7 +41,9 @@ Options parseArguments(const QApplication& app)
         QStringLiteral("screenshot"),
         QStringLiteral("Render off-screen, save a PNG of the window and exit (docs / UI checks)."),
         QStringLiteral("file"));
-    parser.addOptions({select, tab, theme, screenshot});
+    const QCommandLineOption editMode(QStringLiteral("edit-mode"),
+                                      QStringLiteral("Start with Edit Mode on, without the confirmation (automation)."));
+    parser.addOptions({select, tab, theme, screenshot, editMode});
     parser.process(app);
 
     Options o;
@@ -48,6 +51,7 @@ Options parseArguments(const QApplication& app)
     o.select = parser.value(select);
     o.screenshot = parser.value(screenshot);
     o.theme = parser.value(theme).toLower();
+    o.editMode = parser.isSet(editMode);
     const QStringList tabs{"preview", "structure", "hex", "properties"};
     o.tab = tabs.indexOf(parser.value(tab).toLower());
     return o;
@@ -88,6 +92,7 @@ int main(int argc, char* argv[])
     // Settings live in a readable INI file (%APPDATA%/26Viewer/26Viewer.ini)
     // instead of the registry.
     QSettings::setDefaultFormat(QSettings::IniFormat);
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app.svg"))); // all windows and dialogs
 
     const Options options = parseArguments(app);
 
@@ -103,8 +108,11 @@ int main(int argc, char* argv[])
         theme.setMode(viewer::app::ThemeManager::Mode::System, false);
 
     viewer::app::MainWindow window(games, theme);
+    if (options.editMode)
+        window.setEditMode(true, /*confirm=*/false);
 
     if (!options.screenshot.isEmpty()) {
+        window.setRememberSession(false);
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.resize(1400, 860);
         scheduleScreenshot(window, options);
@@ -115,12 +123,19 @@ int main(int argc, char* argv[])
     window.show();
 
     // `26Viewer <folder|archive>` opens directly (also used by "Open with").
+    // Otherwise reopen last time's game, falling back to the game picker.
     if (!options.path.isEmpty())
         window.openPath(options.path);
     else if (options.screenshot.isEmpty())
-        QTimer::singleShot(0, &window, [&window] { window.chooseGame(); });
-    else // screenshot of the empty start screen
-        QTimer::singleShot(0, &window, [&window] { emit window.sessionChanged(); });
+        QTimer::singleShot(0, &window, [&window] {
+            if (!window.reopenLastSession())
+                window.chooseGame();
+        });
+    else // screenshot of what start-up shows: the reopened game, or the empty start screen
+        QTimer::singleShot(0, &window, [&window] {
+            if (!window.reopenLastSession())
+                emit window.sessionChanged();
+        });
 
     return QApplication::exec();
 }

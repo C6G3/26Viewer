@@ -35,6 +35,21 @@ TEST_CASE("corrupt or short streams are reported, not crashed on")
     CHECK_FALSE(compression::inflateZlib(packed, data.size())); // truncated
 }
 
+TEST_CASE("Our compressors round-trip through our decompressors")
+{
+    const auto data = test::sampleData(70'000, 7);
+    auto z = compression::deflateZlib(data);
+    REQUIRE(z);
+    CHECK(compression::looksLikeZlib(*z));
+    CHECK(compression::inflateZlib(*z, data.size()).value() == data);
+
+    ByteBuffer raw;
+    REQUIRE(compression::deflateRawAppend(data, raw));
+    ByteBuffer out;
+    REQUIRE(compression::inflateRawAppend(raw, data.size(), out));
+    CHECK(out == data);
+}
+
 TEST_CASE("crc32 matches the standard check value")
 {
     CHECK(compression::crc32(asBytes("123456789")) == 0xCBF43926u);

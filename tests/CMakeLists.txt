@@ -6,6 +6,7 @@ add_executable(viewer_tests
     test_image.cpp
     test_blur_pak.cpp
     test_blur_chunks.cpp
+    test_vfs.cpp
     TestUtil.hpp
 )
 target_link_libraries(viewer_tests PRIVATE

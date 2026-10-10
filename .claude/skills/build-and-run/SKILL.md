@@ -51,6 +51,10 @@ timeout 60 build/debug/bin/26Viewer.exe "F:/Games/BLUR" \
 ```
 
 Then Read the PNG. Check both `--theme light` and `--theme dark` after any UI change.
+Add `--edit-mode` to capture Edit Mode UI (badge, "not backed up" banner) without the
+confirmation dialog. Without a path, `--screenshot` captures start-up (reopens the last session).
+Screenshot runs write the `[session]` keys of the user's real settings INI
+(`%APPDATA%\26Viewer\26Viewer.ini`); for edit/backup experiments use archive *copies* in the scratchpad.
 `--tab` accepts preview|structure|hex|properties. `--select` takes a virtual path
 (`<folder>/<archive>/<path inside archive>`).
 

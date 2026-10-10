@@ -6,6 +6,8 @@ qt_standard_project_setup()
 
 qt_add_executable(viewer_app WIN32
     main.cpp
+    AssetEditor.cpp
+    AssetEditor.hpp
     Extractor.cpp
     Extractor.hpp
     GamePickerDialog.cpp
@@ -36,6 +38,7 @@ qt_add_resources(viewer_app "app_resources"
     BASE "${PROJECT_SOURCE_DIR}/resources"
     FILES
         "${PROJECT_SOURCE_DIR}/resources/icons/app.svg"
+        "${PROJECT_SOURCE_DIR}/resources/icons/edit-mode.svg"
         ${_type_icons})
 
 target_compile_definitions(viewer_app PRIVATE
@@ -45,14 +48,39 @@ target_link_libraries(viewer_app PRIVATE
     viewer::core viewer::games viewer::options
     Qt6::Widgets Qt6::Concurrent Qt6::Svg)
 
+if(WIN32)
+    get_target_property(_qmake Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(_qt_bin "${_qmake}" DIRECTORY)
+endif()
+
+# ---- Windows .exe icon + version info ----------------------------------------------
+# tools/icongen renders resources/icons/app.svg into a multi-size .ico at build
+# time, which app.rc embeds together with VERSIONINFO.
+if(WIN32)
+    enable_language(RC)
+    add_executable(viewer_icongen "${PROJECT_SOURCE_DIR}/tools/icongen/main.cpp")
+    target_link_libraries(viewer_icongen PRIVATE Qt6::Gui Qt6::Svg)
+
+    set(VIEWER_ICON_FILE "${CMAKE_CURRENT_BINARY_DIR}/app.ico")
+    add_custom_command(
+        OUTPUT "${VIEWER_ICON_FILE}"
+        COMMAND "${CMAKE_COMMAND}" -E env --modify "PATH=path_list_prepend:${_qt_bin}"
+                "$<TARGET_FILE:viewer_icongen>" "${PROJECT_SOURCE_DIR}/resources/icons/app.svg" "${VIEWER_ICON_FILE}"
+        DEPENDS viewer_icongen "${PROJECT_SOURCE_DIR}/resources/icons/app.svg"
+        COMMENT "Rendering app.ico from app.svg"
+        VERBATIM)
+
+    configure_file(app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
+    target_sources(viewer_app PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc" "${VIEWER_ICON_FILE}")
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/app.rc" PROPERTIES OBJECT_DEPENDS "${VIEWER_ICON_FILE}")
+endif()
+
 # ---- Install / deploy ------------------------------------------------------------
 # `cmake --install build/<preset>` copies the app into dist/<preset> and makes
 # the folder self-contained (see cmake/Deploy.cmake and docs/BUILDING.md).
 install(TARGETS viewer_app RUNTIME DESTINATION .)
 
 if(WIN32)
-    get_target_property(_qmake Qt6::qmake IMPORTED_LOCATION)
-    get_filename_component(_qt_bin "${_qmake}" DIRECTORY)
     find_program(VIEWER_WINDEPLOYQT NAMES windeployqt6 windeployqt HINTS "${_qt_bin}")
     get_filename_component(_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
     install(CODE "

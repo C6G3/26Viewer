@@ -241,6 +241,48 @@ std::vector<const VfsNode*> Vfs::collectFiles(const VfsNode& node)
     return out;
 }
 
+bool Vfs::canReplace(const VfsNode& node) noexcept
+{
+    if (!node.isFile())
+        return false;
+    if (node.archive())
+        return node.archive()->canReplace();
+    return !node.diskPath().empty();
+}
+
+fs::path Vfs::editTarget(const VfsNode& node)
+{
+    if (node.archive())
+        return node.archive()->path();
+    return node.diskPath();
+}
+
+Result<ReplaceReport> Vfs::replace(const VfsNode& node, ByteSpan data) const
+{
+    if (!canReplace(node))
+        return fail(ErrorCode::Unsupported, "'{}' cannot be replaced", node.name());
+
+    const ScopedWritable writable(editTarget(node)); // game files are often read-only
+    if (!writable.status())
+        return std::unexpected(writable.status().error());
+
+    Result<ReplaceReport> report = ReplaceReport{};
+    if (node.archive()) {
+        report = node.archive()->replace(node.entryIndex(), data);
+    } else if (auto written = writeFile(node.diskPath(), data); written) {
+        report->storage = "loose file";
+        report->storedSize = data.size();
+    } else {
+        return std::unexpected(written.error());
+    }
+    if (report) {
+        std::error_code ec;
+        if (const auto backup = backupPathFor(editTarget(node)); std::filesystem::exists(backup, ec))
+            report->backup = backup;
+    }
+    return report;
+}
+
 fs::path sanitizeRelativePath(std::string_view path)
 {
     fs::path out;

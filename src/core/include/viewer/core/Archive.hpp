@@ -31,6 +31,14 @@ struct ArchiveEntry {
     std::optional<std::chrono::system_clock::time_point> modified;
 };
 
+/// Outcome of replacing a file's contents on disk.
+struct ReplaceReport {
+    std::string storage;           ///< How the new data was written ("chunked deflate", ...).
+    std::uint64_t storedSize = 0;  ///< Bytes written for the entry.
+    std::filesystem::path backup;  ///< Existing backup of the original file (empty if none).
+    std::vector<std::string> warnings;
+};
+
 /// An opened archive. Implementations must allow read() from several threads
 /// at once (the UI previews while a background job extracts).
 class Archive {
@@ -48,6 +56,18 @@ public:
     [[nodiscard]] virtual PropertyList describeEntry(std::size_t /*index*/) const { return {}; }
     /// Format-specific details about the archive as a whole.
     [[nodiscard]] virtual PropertyList describe() const { return {}; }
+
+    /// True if this format implements replace().
+    [[nodiscard]] virtual bool canReplace() const noexcept { return false; }
+
+    /// Writes new contents for entry `index` into the archive file on disk,
+    /// keeping the entry's name. Encodes the data the same way the original
+    /// was stored. This object is NOT updated: re-open the archive afterwards.
+    /// Callers are responsible for backups (see Vfs::replace).
+    [[nodiscard]] virtual Result<ReplaceReport> replace(std::size_t /*index*/, ByteSpan /*data*/) const
+    {
+        return fail(ErrorCode::Unsupported, "{} archives cannot be modified yet", formatName());
+    }
 };
 
 /// Recognises and opens one archive format. Registered by game modules (or
@@ -69,5 +89,7 @@ public:
 
 /// Converts a Windows FILETIME (100ns ticks since 1601) to a time_point.
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point> fromFileTime(std::uint64_t ticks) noexcept;
+/// The reverse of fromFileTime().
+[[nodiscard]] std::uint64_t toFileTime(std::chrono::system_clock::time_point time) noexcept;
 
 } // namespace viewer

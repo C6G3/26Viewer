@@ -106,6 +106,21 @@ public:
     /// Every file node at or beneath `node`, in tree order.
     [[nodiscard]] static std::vector<const VfsNode*> collectFiles(const VfsNode& node);
 
+    /// True if replace() can work on this node (loose file, or an entry of an
+    /// archive format that supports writing).
+    [[nodiscard]] static bool canReplace(const VfsNode& node) noexcept;
+
+    /// The file on disk that replace()/restore change for this node: the
+    /// archive containing it, or the loose file itself.
+    [[nodiscard]] static std::filesystem::path editTarget(const VfsNode& node);
+
+    /// Replaces a file's contents on disk while keeping its name. Does NOT
+    /// back up — call ensureBackup(editTarget(node)) first if wanted (the app
+    /// leaves that choice to the user). The mounted tree is stale afterwards:
+    /// mount again to see the change. ReplaceReport::backup names an existing
+    /// backup, if there is one.
+    Result<ReplaceReport> replace(const VfsNode& node, ByteSpan data) const;
+
 private:
     VfsNode* addChild(VfsNode& parent, std::string_view name, VfsNode::Kind kind);
     VfsNode* ensureFolder(VfsNode& parent, std::string_view relativePath);

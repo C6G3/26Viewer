@@ -71,6 +71,30 @@ No shared code changes when a game is added or removed.
 6. Extraction: `startExtraction()` runs on a worker with `QPromise` progress and
    cancellation; the session's `shared_ptr` keeps archives alive meanwhile.
 
+## Editing (replace / restore)
+
+- `Archive::canReplace()` / `Archive::replace(index, data)` — formats opt in; the
+  archive object is *not* updated, callers re-mount afterwards.
+- `Vfs::replace(node, data)` temporarily clears the read-only flag
+  (`ScopedWritable`; game installs often mark archives read-only), then writes
+  via the archive or as a loose file. It **never backs up by itself** —
+  backups are explicit: `ensureBackup(file)` saves `<file>.bak` once and never
+  overwrites it.
+- App side: everything that writes is gated behind **Edit Mode**
+  (`MainWindow::setEditMode`, off at start-up, confirmation required). In Edit
+  Mode the preview shows a red banner for items whose archive/loose file has no
+  `.bak`, with *Back Up Now* (`startBackup`). `AssetEditor` validates
+  replacements (same extension; must still decode if the type has a decoder);
+  the confirmation offers *Back Up & Replace* when no backup exists. After a
+  replace `MainWindow` reloads the session and reselects the item; restore
+  closes the session first, copies the backup back, then reopens.
+
+## Remembered state
+
+`QSettings` (INI) at `%APPDATA%\26Viewer\26Viewer.ini`: theme, window layout,
+per-game install paths, last session (`[session] kind/game/path/selection`,
+`reopenOnStartup`), last-used folders.
+
 ## Threading rules
 
 - Archives are opened once and read concurrently, so `Archive::read` must not mutate shared state.

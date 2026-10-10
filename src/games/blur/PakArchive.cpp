@@ -30,11 +30,13 @@
 #include "PakArchive.hpp"
 
 #include "viewer/core/Compression.hpp"
+#include "viewer/core/Hash.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <format>
+#include <fstream>
 
 namespace viewer::games::blur {
 
@@ -163,6 +165,7 @@ Result<std::unique_ptr<PakArchive>> PakArchive::open(const std::filesystem::path
             return fail(ErrorCode::InvalidFormat, "{}: entry {} points outside the file", name, i);
 
         Slot slot;
+        slot.entryOffset = tableOffset + 12 + std::uint64_t{i} * stride;
         slot.dataOffset = static_cast<std::uint64_t>(offset) * align;
         slot.nameHash = loadScalar<std::uint32_t>(e, stride - 4);
         std::uint64_t packed = 0;
@@ -272,6 +275,153 @@ Result<ByteBuffer> PakArchive::readChunked(ByteSpan raw, std::size_t size) const
         z = *next;
     }
     return out;
+}
+
+// ---- Writing ---------------------------------------------------------------------
+
+namespace {
+
+void appendU32(ByteBuffer& out, std::uint32_t v)
+{
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<std::byte>(v >> (8 * i)));
+}
+
+template <typename T>
+bool writeAt(std::fstream& f, std::uint64_t offset, T value)
+{
+    std::array<char, sizeof(T)> bytes;
+    for (std::size_t i = 0; i < sizeof(T); ++i)
+        bytes[i] = static_cast<char>(static_cast<std::uint64_t>(value) >> (8 * i));
+    f.seekp(static_cast<std::streamoff>(offset));
+    f.write(bytes.data(), bytes.size());
+    return static_cast<bool>(f);
+}
+
+/// Blur's per-entry hash: bitwise NOT of CRC-32 over the uncompressed data.
+/// Verified for every file up to 32 KiB; larger files use an unknown variant.
+constexpr std::uint64_t kHashVerifiedLimit = 32 * 1024;
+
+} // namespace
+
+Result<ByteBuffer> PakArchive::encodeLike(const Slot& slot, std::uint64_t originalSize, ByteSpan data,
+                                          std::string& storageName) const
+{
+    if (m_version < 2) {
+        auto z = compression::deflateZlib(data);
+        if (!z)
+            return std::unexpected(z.error());
+        ByteBuffer out;
+        appendU32(out, static_cast<std::uint32_t>(z->size()));
+        out.insert(out.end(), z->begin(), z->end());
+        storageName = "zlib (size-prefixed, v1)";
+        return out;
+    }
+
+    auto storage = detectStorage(slot, originalSize);
+    if (!storage)
+        return std::unexpected(storage.error());
+    switch (*storage) {
+    case Storage::Stored:
+        storageName = "stored";
+        return ByteBuffer(data.begin(), data.end());
+    case Storage::Zlib:
+        storageName = "zlib";
+        return compression::deflateZlib(data);
+    case Storage::ChunkedDeflate: {
+        // Keep the original chunk size (always 64 KiB in shipped archives).
+        auto head = m_file->read(slot.dataOffset, 4);
+        if (!head)
+            return std::unexpected(head.error());
+        const auto chunk = std::max<std::uint32_t>(1, loadScalar<std::uint32_t>(*head, 0));
+        ByteBuffer out;
+        appendU32(out, chunk);
+        for (std::size_t pos = 0; pos < data.size(); pos += chunk) {
+            const ByteSpan piece = data.subspan(pos, std::min<std::size_t>(chunk, data.size() - pos));
+            const std::size_t sizeAt = out.size();
+            appendU32(out, 0); // zsize, patched below
+            // Always deflate (never store) so readers can't mistake the chunk type.
+            if (auto ok = compression::deflateRawAppend(piece, out); !ok)
+                return std::unexpected(ok.error());
+            const auto z = static_cast<std::uint32_t>(out.size() - sizeAt - 4);
+            for (int i = 0; i < 4; ++i)
+                out[sizeAt + static_cast<std::size_t>(i)] = static_cast<std::byte>(z >> (8 * i));
+        }
+        storageName = "chunked raw deflate";
+        return out;
+    }
+    }
+    return fail(ErrorCode::Unsupported, "unknown storage");
+}
+
+Result<ReplaceReport> PakArchive::replace(std::size_t index, ByteSpan data) const
+{
+    if (index >= m_entries.size())
+        return fail(ErrorCode::NotFound, "entry {} out of range", index);
+    if (data.size() > UINT32_MAX)
+        return fail(ErrorCode::Unsupported, "Blur archives cannot hold files of 4 GiB or more");
+
+    const Slot& slot = m_slots[index];
+    ReplaceReport report;
+    auto blob = encodeLike(slot, m_entries[index].size, data, report.storage);
+    if (!blob)
+        return std::unexpected(blob.error());
+
+    const auto& path = m_file->path();
+    std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!f)
+        return fail(ErrorCode::Io, "cannot open '{}' for writing (read-only, or in use by the game?)",
+                    u8name(path));
+
+    // 1. Append the new data at the next alignment boundary (old data stays, unused).
+    f.seekp(0, std::ios::end);
+    const auto end = static_cast<std::uint64_t>(f.tellp());
+    const std::uint64_t align = m_alignment;
+    const std::uint64_t dataPos = (end + align - 1) / align * align;
+    const std::uint64_t paddedEnd = (dataPos + blob->size() + align - 1) / align * align;
+    const std::vector<char> zeros(static_cast<std::size_t>(dataPos - end), 0);
+    f.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+    f.write(reinterpret_cast<const char*>(blob->data()), static_cast<std::streamsize>(blob->size()));
+    const std::vector<char> tail(static_cast<std::size_t>(paddedEnd - dataPos - blob->size()), 0);
+    f.write(tail.data(), static_cast<std::streamsize>(tail.size()));
+    if (!f)
+        return fail(ErrorCode::Io, "write failed in '{}' (disk full?)", u8name(path));
+    f.flush();
+
+    // 2. Re-point this entry's record at the new data. Done last, so an
+    //    interrupted write leaves the archive pointing at the old data.
+    const std::uint64_t e = slot.entryOffset;
+    bool ok = writeAt(f, e + 8, static_cast<std::uint32_t>(data.size()))
+              && writeAt(f, e + 12, toFileTime(std::chrono::system_clock::now()))
+              && writeAt(f, e + 20, static_cast<std::int64_t>(dataPos / align));
+    if (m_version >= 2) {
+        ok = ok && writeAt(f, e + 28, compression::crc32(data) ^ 0xFFFFFFFFu)
+             && writeAt(f, e + 32, static_cast<std::uint32_t>(blob->size()));
+        if (m_entryStride == 64) {
+            const auto digest = hash::sha1(*blob); // SHA-1 of the stored bytes
+            f.seekp(static_cast<std::streamoff>(e + 40));
+            f.write(reinterpret_cast<const char*>(digest.data()), static_cast<std::streamsize>(digest.size()));
+            ok = ok && static_cast<bool>(f);
+        }
+    }
+    f.flush();
+    if (!ok || !f)
+        return fail(ErrorCode::Io, "could not update the file table of '{}'", u8name(path));
+
+    report.storedSize = blob->size();
+    if (m_version >= 2 && data.size() > kHashVerifiedLimit)
+        report.warnings.push_back(
+            "Blur's checksum for files over 32 KiB isn't fully understood; a CRC-32 was written instead. "
+            "If the game rejects the file, this is the likely reason.");
+    auto sig = path;
+    sig.replace_extension(".sig");
+    std::error_code ec;
+    if (std::filesystem::exists(sig, ec))
+        report.warnings.push_back(std::format(
+            "{} is signed ({}). The game may refuse modified signed archives unless signature checks are "
+            "disabled (e.g. by a mod loader).",
+            u8name(path), u8name(sig)));
+    return report;
 }
 
 PropertyList PakArchive::describeEntry(std::size_t index) const

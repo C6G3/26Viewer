@@ -48,10 +48,17 @@ std::string normalizeArchivePath(std::string_view raw)
     return out;
 }
 
+// FILETIME counts 100ns intervals since 1601-01-01; Unix time starts 1970-01-01.
+constexpr std::uint64_t kEpochDelta = 116'444'736'000'000'000ULL;
+
+std::uint64_t toFileTime(std::chrono::system_clock::time_point time) noexcept
+{
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(time.time_since_epoch()).count();
+    return static_cast<std::uint64_t>(us) * 10 + kEpochDelta;
+}
+
 std::optional<std::chrono::system_clock::time_point> fromFileTime(std::uint64_t ticks) noexcept
 {
-    // FILETIME counts 100ns intervals since 1601-01-01; Unix time starts 1970-01-01.
-    constexpr std::uint64_t kEpochDelta = 116'444'736'000'000'000ULL;
     if (ticks <= kEpochDelta || ticks == UINT64_MAX)
         return std::nullopt;
     const auto sinceUnix = std::chrono::microseconds((ticks - kEpochDelta) / 10);

@@ -67,4 +67,10 @@ QIcon appIcon()
     return icon;
 }
 
+QIcon editMode()
+{
+    static const QIcon icon(QStringLiteral(":/icons/edit-mode.svg"));
+    return icon;
+}
+
 } // namespace viewer::app::icons

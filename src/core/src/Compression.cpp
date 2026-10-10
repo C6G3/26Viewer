@@ -90,6 +90,48 @@ Result<ByteBuffer> inflateZlibUnknownSize(ByteSpan input, std::size_t sizeLimit)
     return out;
 }
 
+namespace {
+
+Result<void> runDeflate(ByteSpan input, int windowBits, int level, ByteBuffer& out)
+{
+    if (input.size() > std::numeric_limits<uInt>::max())
+        return fail(ErrorCode::Unsupported, "block too large to compress ({} bytes)", input.size());
+    z_stream zs{};
+    if (deflateInit2(&zs, level, Z_DEFLATED, windowBits, 9, Z_DEFAULT_STRATEGY) != Z_OK)
+        return fail(ErrorCode::Decompression, "deflateInit2 failed");
+    const std::size_t base = out.size();
+    const std::size_t bound = deflateBound(&zs, static_cast<uLong>(input.size()));
+    out.resize(base + bound);
+    zs.next_in = reinterpret_cast<Bytef*>(const_cast<std::byte*>(input.data()));
+    zs.avail_in = static_cast<uInt>(input.size());
+    zs.next_out = reinterpret_cast<Bytef*>(out.data() + base);
+    zs.avail_out = static_cast<uInt>(bound);
+    const int rc = deflate(&zs, Z_FINISH);
+    const std::size_t produced = zs.total_out;
+    deflateEnd(&zs);
+    if (rc != Z_STREAM_END) {
+        out.resize(base);
+        return fail(ErrorCode::Decompression, "deflate failed ({})", rc);
+    }
+    out.resize(base + produced);
+    return {};
+}
+
+} // namespace
+
+Result<ByteBuffer> deflateZlib(ByteSpan input, int level)
+{
+    ByteBuffer out;
+    if (auto r = runDeflate(input, 15, level, out); !r)
+        return std::unexpected(r.error());
+    return out;
+}
+
+Result<void> deflateRawAppend(ByteSpan input, ByteBuffer& out, int level)
+{
+    return runDeflate(input, -15, level, out);
+}
+
 bool looksLikeZlib(ByteSpan input) noexcept
 {
     if (input.size() < 2)

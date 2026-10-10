@@ -16,5 +16,6 @@ QIcon folder();
 QIcon archive();
 QIcon forCategory(FileCategory category);
 QIcon appIcon();
+QIcon editMode();
 
 } // namespace viewer::app::icons

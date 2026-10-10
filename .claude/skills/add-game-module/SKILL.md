@@ -45,6 +45,12 @@ Archive classes — model them on `src/games/blur/PakArchive.*`:
 - Normalise names with `normalizeArchivePath`, timestamps with `fromFileTime` (if FILETIME).
 - Skip directory records; the VFS builds folders from paths.
 - Fill `describe()`/`describeEntry()` with format details for the Properties tab.
+- Optional writing: override `canReplace()` + `replace(index, data)` (see
+  `PakArchive::replace`): encode like the original entry, append at the end,
+  patch only that entry's record *last*. Read-only handling is done by
+  `Vfs::replace`; backups are always the user's explicit choice (Edit Mode banner /
+  `ensureBackup`) — never back up or write outside Edit Mode automatically. Test round-trips on synthetic archives and
+  on **copies** of real archives in the scratchpad — never on the user's install.
 
 ## Register and build
 

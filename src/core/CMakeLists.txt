@@ -11,6 +11,7 @@ add_library(viewer_core STATIC
     include/viewer/core/FileTypes.hpp
     include/viewer/core/Game.hpp
     include/viewer/core/GameRegistry.hpp
+    include/viewer/core/Hash.hpp
     include/viewer/core/Image.hpp
     include/viewer/core/RandomAccessFile.hpp
     include/viewer/core/Vfs.hpp
@@ -19,6 +20,7 @@ add_library(viewer_core STATIC
     src/ContentRegistry.cpp
     src/FileTypes.cpp
     src/GameRegistry.cpp
+    src/Hash.cpp
     src/Image.cpp
     src/RandomAccessFile.cpp
     src/Vfs.cpp

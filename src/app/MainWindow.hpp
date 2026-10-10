@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AssetEditor.hpp"
 #include "Extractor.hpp"
 #include "Session.hpp"
 
@@ -8,9 +9,11 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 class QAction;
 class QLabel;
+class QMimeData;
 class QLineEdit;
 class QProgressBar;
 class QStackedWidget;
@@ -43,6 +46,19 @@ public:
     /// Selects and reveals a node by virtual path ("cache/root.pak/models/a.model").
     bool selectPath(const QString& virtualPath);
     [[nodiscard]] PreviewPane* previewPane() const noexcept { return m_preview; }
+    /// Re-opens the game/archive from the previous run (saved in the settings
+    /// file in %APPDATA%). Returns false if there is nothing to reopen or the
+    /// user turned the option off.
+    bool reopenLastSession();
+
+    /// Edit Mode unlocks replacing/restoring (off at every start, like OpenIV).
+    /// With `confirm`, the user must accept a warning before it turns on.
+    void setEditMode(bool on, bool confirm = true);
+    [[nodiscard]] bool editMode() const noexcept { return m_editMode; }
+
+    /// Automation runs (--screenshot) pass false so they don't overwrite the
+    /// user's remembered session.
+    void setRememberSession(bool remember) noexcept { m_rememberSession = remember; }
 
 signals:
     /// A game or archive finished loading (or the session was closed).
@@ -50,6 +66,7 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
@@ -68,6 +85,23 @@ private:
 
     void extract(bool everything);
     void onExtractFinished();
+
+    // Replacing assets (see AssetEditor)
+    void replaceSelected();
+    void replaceNode(const VfsNode* node, const QString& file);
+    void restoreOriginal();
+    void onEditFinished();
+    /// Re-mounts the current game/archive and then selects `virtualPath`.
+    void reloadSession(const QString& virtualPath);
+    /// The file node a drag at `pos` would replace; `reason` explains a refusal.
+    const VfsNode* dropTarget(const QPoint& pos, const QMimeData* mime, QString* reason) const;
+    void rememberSession() const;
+    /// Shows/hides the preview's red "not backed up" banner for the current item.
+    void updateBackupBanner();
+    /// Backs up the current item's archive (or loose file) in the background.
+    void backupCurrent();
+    [[nodiscard]] const VfsNode* currentNode() const;
+
     void showTreeContextMenu(const QPoint& pos);
     [[nodiscard]] std::vector<const VfsNode*> selectedNodes() const;
     void updateActions();
@@ -78,7 +112,14 @@ private:
     std::shared_ptr<Session> m_session;
     QFutureWatcher<LoadResult>* m_loadWatcher;
     QFutureWatcher<ExtractSummary>* m_extractWatcher;
+    QFutureWatcher<EditResult>* m_editWatcher;
     QString m_extractTarget;
+    QString m_pendingSelect; ///< Selected once the next session finishes loading.
+    struct Reopen {
+        const Game* game = nullptr; ///< Null for a standalone archive.
+        std::filesystem::path source;
+    };
+    std::optional<Reopen> m_reopen; ///< What to reopen after a restore closed the session.
 
     VfsModel* m_model;
     VfsFilterModel* m_filter;
@@ -97,6 +138,13 @@ private:
     QAction* m_extractAllAction = nullptr;
     QAction* m_copyPathAction = nullptr;
     QAction* m_revealAction = nullptr;
+    QAction* m_replaceAction = nullptr;
+    QAction* m_restoreAction = nullptr;
+    QAction* m_reopenAction = nullptr;
+    QAction* m_editModeAction = nullptr;
+    QLabel* m_editModeBadge = nullptr;
+    bool m_editMode = false;
+    bool m_rememberSession = true;
 };
 
 } // namespace viewer::app
