@@ -28,6 +28,8 @@
 
 #include "ModelDecoder.hpp"
 
+#include "ChunkFile.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -65,12 +67,84 @@ struct Stream {
     std::uint32_t byteOffset = 0;
 };
 
+/// A node of MdlDat's Element table: name, parent and placement.
+struct Element {
+    std::string name;
+    int parent = -1;
+    float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}; ///< Row vectors: p' = p * R + position
+    float position[3] = {0, 0, 0};
+
+    [[nodiscard]] bool isIdentity() const noexcept
+    {
+        static constexpr float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        for (int i = 0; i < 9; ++i)
+            if (std::abs(rotation[i] - identity[i]) > 1e-5f)
+                return false;
+        return position[0] == 0 && position[1] == 0 && position[2] == 0;
+    }
+};
+
+/// MdlDat { StrTab, Element }: the model's named hierarchy (empty if absent).
+///   StrTab:  u32 count, u32 offsets[count], u32 ?, then NUL-terminated strings
+///   Element: 104-byte records — u32 0, f32 rotation[9], f32 position[3],
+///            f32 bounds[6], u32 name (string index), u32 index, i32 parent,
+///            i32 first child, i32 next sibling, u32 ?, u32 render tag
+std::vector<Element> readElements(ByteSpan d)
+{
+    std::vector<Element> elements;
+    auto root = parseChunkFile(d);
+    if (!root)
+        return elements;
+    const Chunk* mdl = root->child("MdlDat");
+    const Chunk* strtab = mdl ? mdl->child("StrTab") : nullptr;
+    const Chunk* table = mdl ? mdl->child("Element") : nullptr;
+    if (!strtab || !table || table->payloadSize() % 104)
+        return elements;
+
+    const ByteSpan strings = d.subspan(strtab->payloadOffset(), strtab->payloadSize());
+    if (strings.size() < 4)
+        return elements;
+    const auto count = loadScalar<std::uint32_t>(strings, 0);
+    const std::size_t pool = 8 + 4 * std::size_t{count};
+    if (pool > strings.size())
+        return elements;
+    const auto stringAt = [&](std::uint32_t index) -> std::string {
+        if (index >= count)
+            return {};
+        const std::size_t start = pool + loadScalar<std::uint32_t>(strings, 4 + 4 * std::size_t{index});
+        std::string out;
+        for (std::size_t i = start; i < strings.size() && strings[i] != std::byte{0}; ++i)
+            out += static_cast<char>(strings[i]);
+        return out;
+    };
+
+    const ByteSpan records = d.subspan(table->payloadOffset(), table->payloadSize());
+    for (std::size_t r = 0; r < records.size() / 104; ++r) {
+        const std::size_t at = r * 104;
+        Element e;
+        for (int i = 0; i < 9; ++i)
+            e.rotation[i] = loadScalar<float>(records, at + 4 + 4 * i);
+        for (int i = 0; i < 3; ++i)
+            e.position[i] = loadScalar<float>(records, at + 40 + 4 * i);
+        e.name = stringAt(loadScalar<std::uint32_t>(records, at + 76));
+        const auto parent = loadScalar<std::int32_t>(records, at + 84);
+        e.parent = parent >= 0 && static_cast<std::size_t>(parent) < records.size() / 104 ? parent : -1;
+        if (!std::ranges::all_of(e.rotation, [](float f) { return std::isfinite(f); })
+            || !std::ranges::all_of(e.position, [](float f) { return std::isfinite(f); }))
+            e = Element{e.name, e.parent};
+        elements.push_back(std::move(e));
+    }
+    return elements;
+}
+
 /// The draws for one mesh part at each level of detail, and where its vertices are.
 struct Group {
     const std::vector<std::uint16_t>* indices = nullptr;
     std::vector<Draw> lods;
     std::size_t slots = 0; ///< LOD slots, including empty ones (the part isn't drawn at those levels).
     std::optional<Stream> stream;
+    int element = -1;            ///< MdlDat element it belongs to (its name and placement).
+    std::uint32_t material = 0;  ///< Material slot.
     std::uint32_t highestIndex = 0;
     std::uint64_t vertexRange = 0; ///< max(minIndex + vertexCount)
 };
@@ -191,6 +265,26 @@ std::map<std::uint32_t, std::size_t> solveBuffers(const std::vector<VertexBuffer
     return mapping;
 }
 
+/// Moves a part from its element's local space into model space: its vertices
+/// are copied (other parts may share them) and transformed, p' = p * R + t.
+void placePart(Mesh& mesh, Mesh::Part& part, const Element& e)
+{
+    std::map<std::uint32_t, std::uint32_t> copies;
+    for (const Mesh::Range& range : part.lods)
+        for (std::uint32_t i = range.firstIndex; i < range.firstIndex + range.indexCount; ++i) {
+            const std::uint32_t v = mesh.indices[i];
+            auto [it, added] = copies.try_emplace(v, static_cast<std::uint32_t>(mesh.vertexCount()));
+            if (added) {
+                const float x = mesh.positions[3 * v], y = mesh.positions[3 * v + 1], z = mesh.positions[3 * v + 2];
+                const float* r = e.rotation;
+                mesh.positions.insert(mesh.positions.end(), {x * r[0] + y * r[3] + z * r[6] + e.position[0],
+                                                             x * r[1] + y * r[4] + z * r[7] + e.position[1],
+                                                             x * r[2] + y * r[5] + z * r[8] + e.position[2]});
+            }
+            mesh.indices[i] = it->second;
+        }
+}
+
 } // namespace
 
 bool ModelDecoder::canDecode(std::string_view extension, ByteSpan) const
@@ -276,6 +370,12 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
             if (end + 28 <= d.size() && s.isRA(end, 0) && s.isRA(end + 8, 0) && s.u32(end + 4) >= 1
                 && s.u32(end + 4) <= 4)
                 g.stream = Stream{s.u32(end + 12), s.u32(end + 20)};
+            // Before the group: "RA" 01 00, u32 material, u32 ?, u32 ?, u32 ?, u32 element
+            // (low 16 bits; the high bits are flags).
+            if (const std::size_t first = g.lods.front().at; first >= 0x54 && s.isRA(first - 0x54, 1)) {
+                g.material = s.u32(first - 0x50);
+                g.element = static_cast<int>(s.u32(first - 0x40) & 0xFFFF);
+            }
             for (const Draw& lod : g.lods) {
                 const auto slice = std::span(ib).subspan(lod.start, lod.count);
                 g.highestIndex = std::max<std::uint32_t>(g.highestIndex, *std::ranges::max_element(slice));
@@ -288,6 +388,10 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
 
     // ---- 3. Triangles of every group at every level of detail ------------------------------
     Mesh mesh;
+    mesh.leftHanded = true; // Direct3D
+    const std::vector<Element> elements = readElements(d);
+    for (const Element& e : elements)
+        mesh.nodes.push_back({e.name, e.parent});
     std::map<std::size_t, std::uint32_t> baseVertex; // vb index -> first vertex in mesh.positions
     const auto addVertexBuffer = [&](std::size_t vbIndex) -> std::optional<std::uint32_t> {
         if (const auto it = baseVertex.find(vbIndex); it != baseVertex.end())
@@ -389,7 +493,14 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
         if (std::ranges::all_of(part.lods, [](const Mesh::Range& r) { return r.indexCount == 0; }))
             continue;
         shadows += part.shadow;
-        part.name = std::format("Part {}", mesh.parts.size() + 1);
+        const bool named = group.element >= 0 && static_cast<std::size_t>(group.element) < elements.size()
+                           && !elements[static_cast<std::size_t>(group.element)].name.empty();
+        part.node = named ? group.element : -1;
+        part.name = named ? elements[static_cast<std::size_t>(group.element)].name
+                          : std::format("Part {}", mesh.parts.size() + 1);
+        part.material = std::format("Material {}", group.material);
+        if (named && !elements[static_cast<std::size_t>(group.element)].isIdentity())
+            placePart(mesh, part, elements[static_cast<std::size_t>(group.element)]);
         mesh.parts.push_back(std::move(part));
     }
     if (mesh.indices.empty())

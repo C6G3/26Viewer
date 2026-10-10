@@ -213,7 +213,23 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
 - Vertex element 0 is the position: 3 floats (12/16 bytes) or 4 halves (8 bytes).
   Buffers with only a position are shadow hulls (`veh_Shadow.fx`).
 - 1,539 of 1,543 models decode; the other 4 contain no geometry.
-- Not yet: element names ↔ draw groups, materials (`veh_Paint…fx`, textures), UVs, normals.
+- Positions are left-handed (Direct3D: x right, y up, z forward), so viewers mirror x.
+
+### Names, hierarchy and placement (`MdlDat`)
+
+- `StrTab`: u32 count, u32 offsets[count], u32 ?, then NUL-terminated strings.
+- `Element`: 104-byte records — u32 0, f32 rotation[9], f32 position[3], f32 bounds[6],
+  u32 name (string index), u32 index, i32 parent, i32 first child, i32 next sibling, u32 ?,
+  u32 render tag (`0xC0000000 | k`, or −1 for nodes without geometry such as damage bones).
+  Element 0 is `DefaultElement`; e.g. `e_exterior` › `e_door_left` › `e_mirror_left`.
+- Transforms are absolute (children repeat their parent's placement), applied as
+  `p' = p · R + position` (Direct3D row vectors). Wheel parts (tyres, discs, rims) are
+  modelled at the origin and placed at their hub this way.
+- Each draw group is preceded (0x54 bytes before its first draw) by
+  `"RA" 01 00, u32 material, u32 ?, u32 ?, u32 ?, u32 element` — the element's low 16 bits
+  name the part (high bits are flags). Matches 14,983 of 14,994 groups across all models.
+- `Models` (100-byte records: rotation, position, bounds, links) holds the damage-bone set.
+- Not yet: materials (`veh_Paint…fx`, textures), UVs, normals.
 
 ## Other files
 

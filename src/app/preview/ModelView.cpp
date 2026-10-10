@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <set>
 #include <utility>
@@ -108,6 +109,7 @@ void ModelCanvas::setMesh(std::shared_ptr<const Mesh> mesh)
     m_mesh = std::move(mesh);
     m_dirty = true;
     m_lod = 0;
+    m_mirror = m_mesh && m_mesh->leftHanded;
     m_visible.assign(m_mesh ? m_mesh->parts.size() : 0, true);
     m_highlighted.assign(m_visible.size(), false);
     // Bounds of the real geometry (not shadow hulls) → camera framing, grid and ground.
@@ -301,6 +303,8 @@ QMatrix4x4 ModelCanvas::viewMatrix() const
     view.translate(0, 0, -m_distance);
     view.rotate(m_pitch, 1, 0, 0);
     view.rotate(m_yaw, 0, 1, 0);
+    if (m_mirror)
+        view.scale(-1.0f, 1.0f, 1.0f);
     view.translate(-m_target);
     return view;
 }
@@ -407,7 +411,8 @@ void ModelCanvas::paintGL()
         glDisable(GL_POLYGON_OFFSET_FILL);
     }
     if (m_wireframe || !m_solid) {
-        const QVector3D line = m_solid ? rgb(palette().color(QPalette::Text)) * 0.6f : rgb(palette().color(QPalette::Text));
+        // Over faces: black, readable on every part; without faces: the text colour (black would vanish in dark mode).
+        const QVector3D line = m_solid ? QVector3D(0, 0, 0) : rgb(palette().color(QPalette::Text));
         m_program.setUniformValue("lit", 0.0f);
         m_edges.bind();
         for (std::size_t p = 0; p < mesh.parts.size() && p < m_edgeRanges.size(); ++p) {
@@ -519,13 +524,8 @@ ModelView::ModelView(QWidget* parent)
     });
     connect(m_parts, &QTreeWidget::itemSelectionChanged, this, [this] {
         std::vector<int> selected;
-        for (QTreeWidgetItem* item : m_parts->selectedItems()) {
-            if (const QVariant v = item->data(0, Qt::UserRole); v.isValid())
-                selected.push_back(v.toInt());
-            else // a group: all its parts
-                for (int i = 0; i < item->childCount(); ++i)
-                    selected.push_back(item->child(i)->data(0, Qt::UserRole).toInt());
-        }
+        for (QTreeWidgetItem* item : m_parts->selectedItems())
+            collectParts(item, selected);
         m_canvas->setHighlightedParts(std::move(selected));
     });
     connect(m_parts, &QTreeWidget::customContextMenuRequested, this, &ModelView::showPartsMenu);
@@ -586,38 +586,111 @@ void ModelView::buildTree()
 {
     m_updatingTree = true;
     m_parts->clear();
-    m_partItems.clear();
-    if (m_mesh) {
-        // One folder per group, in the order the groups first appear; shadow hulls last and off.
-        std::map<std::string, QTreeWidgetItem*> folders;
-        std::vector<std::pair<std::string, bool>> order;
-        for (const Mesh::Part& part : m_mesh->parts)
-            if (!folders.contains(part.group)) {
-                folders[part.group] = nullptr;
-                order.emplace_back(part.group, part.shadow);
-            }
-        std::ranges::stable_partition(order, [](const auto& g) { return !g.second; });
-        for (const auto& [name, shadow] : order) {
-            auto* folder = new QTreeWidgetItem(m_parts, {toQString(name)});
-            folder->setToolTip(0, toQString(name));
-            folder->setFlags(folder->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
-            folder->setCheckState(0, shadow ? Qt::Unchecked : Qt::Checked);
-            folder->setIcon(0, icons::forCategory(FileCategory::Model));
-            folders[name] = folder;
-        }
-        for (std::size_t i = 0; i < m_mesh->parts.size(); ++i) {
-            const Mesh::Part& part = m_mesh->parts[i];
-            auto* item = new QTreeWidgetItem(folders[part.group], {toQString(part.name)});
-            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-            item->setCheckState(0, part.shadow ? Qt::Unchecked : Qt::Checked);
-            item->setData(0, Qt::UserRole, static_cast<int>(i));
-            item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
-            m_partItems.push_back(item);
-        }
-        if (m_parts->topLevelItemCount() <= 4)
-            m_parts->expandAll();
+    m_partItems.assign(m_mesh ? m_mesh->parts.size() : 0, nullptr);
+    if (!m_mesh) {
+        m_updatingTree = false;
+        return;
     }
+    const auto folderItem = [](QTreeWidgetItem* item, Qt::CheckState state) {
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
+        item->setCheckState(0, state);
+    };
+    const auto partItem = [&](QTreeWidgetItem* item, std::size_t part) {
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, m_mesh->parts[part].shadow ? Qt::Unchecked : Qt::Checked);
+        item->setData(0, Qt::UserRole, static_cast<int>(part));
+        item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+        item->setToolTip(0, toQString(m_mesh->parts[part].material));
+        m_partItems[part] = item;
+    };
+
+    const auto& nodes = m_mesh->nodes;
+    std::vector<std::vector<std::size_t>> partsOf(nodes.size());
+    std::vector<std::size_t> loose, shadows;
+    for (std::size_t i = 0; i < m_mesh->parts.size(); ++i) {
+        const Mesh::Part& part = m_mesh->parts[i];
+        if (part.shadow)
+            shadows.push_back(i);
+        else if (part.node >= 0 && static_cast<std::size_t>(part.node) < nodes.size())
+            partsOf[static_cast<std::size_t>(part.node)].push_back(i);
+        else
+            loose.push_back(i);
+    }
+
+    if (!nodes.empty()) {
+        // The model's own hierarchy, keeping only branches that draw something.
+        std::vector<bool> used(nodes.size(), false), hasChildren(nodes.size(), false);
+        for (std::size_t n = 0; n < nodes.size(); ++n)
+            if (!partsOf[n].empty())
+                for (int k = static_cast<int>(n), guard = 0; k >= 0 && guard < 256; ++guard) {
+                    used[static_cast<std::size_t>(k)] = true;
+                    k = nodes[static_cast<std::size_t>(k)].parent;
+                }
+        for (std::size_t n = 0; n < nodes.size(); ++n)
+            if (used[n] && nodes[n].parent >= 0)
+                hasChildren[static_cast<std::size_t>(nodes[n].parent)] = true;
+        std::vector<QTreeWidgetItem*> items(nodes.size(), nullptr);
+        std::function<QTreeWidgetItem*(std::size_t, int)> itemFor = [&](std::size_t n, int depth) -> QTreeWidgetItem* {
+            if (items[n])
+                return items[n];
+            const int parent = nodes[n].parent;
+            QTreeWidgetItem* up = parent >= 0 && depth < 256 ? itemFor(static_cast<std::size_t>(parent), depth + 1) : nullptr;
+            auto* item = up ? new QTreeWidgetItem(up) : new QTreeWidgetItem(m_parts);
+            item->setText(0, toQString(nodes[n].name));
+            items[n] = item;
+            return item;
+        };
+        for (std::size_t n = 0; n < nodes.size(); ++n) {
+            if (!used[n])
+                continue;
+            QTreeWidgetItem* item = itemFor(n, 0);
+            if (partsOf[n].size() == 1 && !hasChildren[n]) {
+                partItem(item, partsOf[n].front()); // a single piece: the node is the part
+                continue;
+            }
+            folderItem(item, Qt::Checked);
+            for (std::size_t part : partsOf[n]) // several materials: one row each
+                partItem(new QTreeWidgetItem(item, {toQString(m_mesh->parts[part].material)}), part);
+        }
+        if (!loose.empty()) {
+            auto* other = new QTreeWidgetItem(m_parts, {tr("Other parts")});
+            folderItem(other, Qt::Checked);
+            for (std::size_t part : loose)
+                partItem(new QTreeWidgetItem(other, {toQString(m_mesh->parts[part].name)}), part);
+        }
+    } else {
+        // No hierarchy in the file: one folder per group, in the order the groups first appear.
+        std::map<std::string, QTreeWidgetItem*> folders;
+        for (std::size_t part : loose) {
+            QTreeWidgetItem*& folder = folders[m_mesh->parts[part].group];
+            if (!folder) {
+                folder = new QTreeWidgetItem(m_parts, {toQString(m_mesh->parts[part].group)});
+                folderItem(folder, Qt::Checked);
+            }
+            partItem(new QTreeWidgetItem(folder, {toQString(m_mesh->parts[part].name)}), part);
+        }
+    }
+    if (!shadows.empty()) {
+        auto* folder = new QTreeWidgetItem(m_parts, {tr("Shadow hulls")});
+        folderItem(folder, Qt::Unchecked);
+        folder->setToolTip(0, tr("Simplified shapes the game uses to cast shadows"));
+        for (std::size_t part : shadows)
+            partItem(new QTreeWidgetItem(folder, {toQString(m_mesh->parts[part].name)}), part);
+    }
+    for (int i = 0; i < m_parts->topLevelItemCount(); ++i) // top level plus one more
+        m_parts->topLevelItem(i)->setExpanded(true);
+    if (m_parts->topLevelItemCount() == 1)
+        for (int i = 0; i < m_parts->topLevelItem(0)->childCount(); ++i)
+            m_parts->topLevelItem(0)->child(i)->setExpanded(true);
     m_updatingTree = false;
+}
+
+void ModelView::collectParts(QTreeWidgetItem* item, std::vector<int>& out) const
+{
+    if (const QVariant v = item->data(0, Qt::UserRole); v.isValid())
+        out.push_back(v.toInt());
+    for (int i = 0; i < item->childCount(); ++i)
+        collectParts(item->child(i), out);
 }
 
 void ModelView::updateCounts()
@@ -631,6 +704,8 @@ void ModelView::updateCounts()
     std::size_t shown = 0;
     m_updatingTree = true;
     for (std::size_t i = 0; i < m_partItems.size(); ++i) {
+        if (!m_partItems[i])
+            continue;
         const auto& lods = m_mesh->parts[i].lods;
         const std::uint32_t triangles = lod < lods.size() ? lods[lod].indexCount / 3 : 0;
         m_partItems[i]->setText(1, triangles ? locale.toString(triangles) : QStringLiteral("—"));
@@ -638,16 +713,23 @@ void ModelView::updateCounts()
         if (m_partItems[i]->checkState(0) == Qt::Checked)
             shown += triangles;
     }
-    for (int f = 0; f < m_parts->topLevelItemCount(); ++f) { // folders: their parts' total
-        QTreeWidgetItem* folder = m_parts->topLevelItem(f);
-        std::size_t total = 0;
-        for (int c = 0; c < folder->childCount(); ++c) {
-            const auto& lods = m_mesh->parts[static_cast<std::size_t>(folder->child(c)->data(0, Qt::UserRole).toInt())].lods;
-            total += lod < lods.size() ? lods[lod].indexCount / 3 : 0;
+    // Folders: the total of the parts under them.
+    std::function<std::size_t(QTreeWidgetItem*)> total = [&](QTreeWidgetItem* item) -> std::size_t {
+        std::size_t sum = 0;
+        if (const QVariant v = item->data(0, Qt::UserRole); v.isValid()) {
+            const auto& lods = m_mesh->parts[static_cast<std::size_t>(v.toInt())].lods;
+            sum += lod < lods.size() ? lods[lod].indexCount / 3 : 0;
         }
-        folder->setText(1, locale.toString(static_cast<qulonglong>(total)));
-        folder->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
-    }
+        for (int c = 0; c < item->childCount(); ++c)
+            sum += total(item->child(c));
+        if (item->childCount()) {
+            item->setText(1, locale.toString(static_cast<qulonglong>(sum)));
+            item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+        }
+        return sum;
+    };
+    for (int f = 0; f < m_parts->topLevelItemCount(); ++f)
+        total(m_parts->topLevelItem(f));
     m_updatingTree = false;
     m_info->setText(tr("%1 vertices  ·  %2 triangles shown  ·  %n part(s)", nullptr,
                        static_cast<int>(m_mesh->parts.size()))
@@ -659,7 +741,7 @@ void ModelView::applyVisibility()
 {
     std::vector<bool> visible(m_partItems.size());
     for (std::size_t i = 0; i < m_partItems.size(); ++i)
-        visible[i] = m_partItems[i]->checkState(0) == Qt::Checked;
+        visible[i] = m_partItems[i] && m_partItems[i]->checkState(0) == Qt::Checked;
     m_canvas->setVisibleParts(std::move(visible));
     updateCounts();
 }
@@ -668,10 +750,9 @@ void ModelView::setAllParts(bool on, bool includeShadows)
 {
     m_updatingTree = true;
     for (std::size_t i = 0; i < m_partItems.size(); ++i)
-        if (includeShadows || !m_mesh->parts[i].shadow)
-            m_partItems[i]->setCheckState(0, on ? Qt::Checked : Qt::Unchecked);
-        else
-            m_partItems[i]->setCheckState(0, Qt::Unchecked);
+        if (m_partItems[i])
+            m_partItems[i]->setCheckState(0, on && (includeShadows || !m_mesh->parts[i].shadow) ? Qt::Checked
+                                                                                                : Qt::Unchecked);
     m_updatingTree = false;
     applyVisibility();
 }
@@ -684,17 +765,14 @@ void ModelView::showPartsMenu(const QPoint& pos)
     const QList<QTreeWidgetItem*> selected = m_parts->selectedItems();
     if (!selected.isEmpty()) {
         menu.addAction(tr("Show &Only Selected"), this, [this, selected] {
-            std::set<int> keep;
-            for (QTreeWidgetItem* item : selected) {
-                if (const QVariant v = item->data(0, Qt::UserRole); v.isValid())
-                    keep.insert(v.toInt());
-                else
-                    for (int i = 0; i < item->childCount(); ++i)
-                        keep.insert(item->child(i)->data(0, Qt::UserRole).toInt());
-            }
+            std::vector<int> parts;
+            for (QTreeWidgetItem* item : selected)
+                collectParts(item, parts);
+            const std::set<int> keep(parts.begin(), parts.end());
             m_updatingTree = true;
             for (std::size_t i = 0; i < m_partItems.size(); ++i)
-                m_partItems[i]->setCheckState(0, keep.contains(static_cast<int>(i)) ? Qt::Checked : Qt::Unchecked);
+                if (m_partItems[i])
+                    m_partItems[i]->setCheckState(0, keep.contains(static_cast<int>(i)) ? Qt::Checked : Qt::Unchecked);
             m_updatingTree = false;
             applyVisibility();
         });

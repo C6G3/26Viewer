@@ -96,6 +96,7 @@ private:
     float m_distance = 3.0f;
     float m_yaw = -35.0f;
     float m_pitch = 20.0f;
+    bool m_mirror = false; ///< Left-handed (Direct3D) model: flip x so it isn't shown mirrored.
     QPoint m_lastMouse;
 };
 
@@ -111,6 +112,8 @@ public:
 private:
     void buildTree();
     void updateCounts();
+    /// Parts at or under `item` in the tree.
+    void collectParts(QTreeWidgetItem* item, std::vector<int>& out) const;
     void applyVisibility();
     void showPartsMenu(const QPoint& pos);
     void setAllParts(bool on, bool includeShadows);

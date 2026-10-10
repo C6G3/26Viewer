@@ -282,15 +282,19 @@ int cmdBackup(const fs::path& file)
 std::string toObj(const Mesh& mesh)
 {
     std::string out;
+    // OBJ is right-handed: mirror x of left-handed (Direct3D) models and swap the winding.
+    const float sx = mesh.leftHanded ? -1.0f : 1.0f;
     for (std::size_t v = 0; v < mesh.vertexCount(); ++v)
-        out += std::format("v {} {} {}\n", mesh.positions[3 * v], mesh.positions[3 * v + 1], mesh.positions[3 * v + 2]);
+        out += std::format("v {} {} {}\n", sx * mesh.positions[3 * v], mesh.positions[3 * v + 1], mesh.positions[3 * v + 2]);
     for (const Mesh::Part& part : mesh.parts) {
         if (part.shadow || part.lods.empty())
             continue;
-        out += std::format("g {}\n", part.name);
+        out += std::format("g {}_{}\n", part.name, part.material.empty() ? "" : part.material.substr(part.material.rfind(' ') + 1));
         const Mesh::Range& range = part.lods.front();
-        for (std::uint32_t i = range.firstIndex; i + 2 < range.firstIndex + range.indexCount; i += 3)
-            out += std::format("f {} {} {}\n", mesh.indices[i] + 1, mesh.indices[i + 1] + 1, mesh.indices[i + 2] + 1);
+        for (std::uint32_t i = range.firstIndex; i + 2 < range.firstIndex + range.indexCount; i += 3) {
+            const std::uint32_t b = mesh.leftHanded ? i + 2 : i + 1, c = mesh.leftHanded ? i + 1 : i + 2;
+            out += std::format("f {} {} {}\n", mesh.indices[i] + 1, mesh.indices[b] + 1, mesh.indices[c] + 1);
+        }
     }
     return out;
 }

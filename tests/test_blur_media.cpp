@@ -357,6 +357,29 @@ TEST_CASE("Real Blur models and audio banks (set BLUR_DIR to enable)")
     CHECK(mesh->vertexCount() == 1147);
     CHECK(mesh->triangleCount() == 1004);
 
+    // Part names, hierarchy and placement come from MdlDat's Element table.
+    const auto audi = find("models/vehicles/audi_s3_stock.model");
+    REQUIRE(audi);
+    auto car = ModelDecoder().decode((*pak)->read(*audi).value());
+    REQUIRE(car);
+    CHECK(car->leftHanded);
+    REQUIRE(car->nodes.size() == 92);
+    const auto partNamed = [&](std::string_view name) -> const Mesh::Part* {
+        for (const auto& p : car->parts)
+            if (p.name == name)
+                return &p;
+        return nullptr;
+    };
+    const Mesh::Part* door = partNamed("e_door_left");
+    REQUIRE(door);
+    CHECK(car->nodes[static_cast<std::size_t>(door->node)].parent == 1); // under e_exterior
+    // The front-left brake disc is modelled at the origin and placed at its wheel hub (x -0.82, z +1.29).
+    const Mesh::Part* disc = partNamed("e_BrakeDisc_FrontLeft");
+    REQUIRE(disc);
+    const std::uint32_t v = car->indices[disc->lods[0].firstIndex];
+    CHECK(car->positions[3 * v] < -0.6f);
+    CHECK(car->positions[3 * v + 2] > 1.0f);
+
     const auto engine = find("audio/toyota_i6.baf");
     REQUIRE(engine);
     auto bank = BafFormat().open((*pak)->openEntry(*engine).value());
