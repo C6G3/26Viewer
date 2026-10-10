@@ -224,6 +224,15 @@ Result<ByteBuffer> Vfs::read(const VfsNode& node, std::uint64_t limit) const
     return readFile(node.diskPath(), limit);
 }
 
+Result<std::shared_ptr<const ByteSource>> Vfs::source(const VfsNode& node)
+{
+    if (!node.isFile())
+        return fail(ErrorCode::InvalidFormat, "'{}' is not a file", node.name());
+    if (node.archive())
+        return node.archive()->openEntry(node.entryIndex());
+    return fileSource(node.diskPath());
+}
+
 std::vector<const VfsNode*> Vfs::collectFiles(const VfsNode& node)
 {
     std::vector<const VfsNode*> out;

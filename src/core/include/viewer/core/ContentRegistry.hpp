@@ -1,8 +1,10 @@
 #pragma once
 
 #include "viewer/core/Archive.hpp"
+#include "viewer/core/Audio.hpp"
 #include "viewer/core/FileTypes.hpp"
 #include "viewer/core/Image.hpp"
+#include "viewer/core/Mesh.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -52,11 +54,16 @@ public:
     void addArchiveFormat(std::shared_ptr<const ArchiveFormat> format);
     void addImageDecoder(std::shared_ptr<const ImageDecoder> decoder);
     void addStructureParser(std::shared_ptr<const StructureParser> parser);
+    void addMeshDecoder(std::shared_ptr<const MeshDecoder> decoder);
+    void addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format);
 
     /// Finds a format able to open `path` (extension filter, then header probe).
     [[nodiscard]] const ArchiveFormat* findArchiveFormat(const std::filesystem::path& path) const;
     [[nodiscard]] const ImageDecoder* findImageDecoder(std::string_view extension, ByteSpan data) const;
     [[nodiscard]] const StructureParser* findStructureParser(std::string_view extension, ByteSpan data) const;
+    [[nodiscard]] const MeshDecoder* findMeshDecoder(std::string_view extension, ByteSpan data) const;
+    /// `header`: the first bytes of the file (up to 4 KiB).
+    [[nodiscard]] const SoundBankFormat* findSoundBankFormat(std::string_view extension, ByteSpan header) const;
 
     [[nodiscard]] const auto& archiveFormats() const noexcept { return m_archiveFormats; }
 
@@ -65,6 +72,8 @@ private:
     std::vector<std::shared_ptr<const ArchiveFormat>> m_archiveFormats;
     std::vector<std::shared_ptr<const ImageDecoder>> m_imageDecoders;
     std::vector<std::shared_ptr<const StructureParser>> m_structureParsers;
+    std::vector<std::shared_ptr<const MeshDecoder>> m_meshDecoders;
+    std::vector<std::shared_ptr<const SoundBankFormat>> m_soundBankFormats;
 };
 
 /// Registers handlers shared by all games: common file types, DDS decoding.

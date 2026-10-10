@@ -1,5 +1,6 @@
 #pragma once
 
+#include "viewer/core/ByteSource.hpp"
 #include "viewer/core/Bytes.hpp"
 #include "viewer/core/Error.hpp"
 
@@ -51,6 +52,11 @@ public:
 
     /// Returns the fully decompressed contents of entry `index`.
     [[nodiscard]] virtual Result<ByteBuffer> read(std::size_t index) const = 0;
+
+    /// Random access to entry `index` without necessarily loading all of it.
+    /// The default reads the whole entry once; formats override this for
+    /// entries stored uncompressed. The source must not outlive the archive.
+    [[nodiscard]] virtual Result<std::shared_ptr<const ByteSource>> openEntry(std::size_t index) const;
 
     /// Format-specific details about one entry (compression, hashes, ...).
     [[nodiscard]] virtual PropertyList describeEntry(std::size_t /*index*/) const { return {}; }

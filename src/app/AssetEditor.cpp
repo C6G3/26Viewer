@@ -38,11 +38,19 @@ Result<ReplacePlan> planReplace(const Session& session, const VfsNode& node, con
     auto data = readFile(toPath(file));
     if (!data)
         return std::unexpected(data.error());
+    return planReplaceData(session, node, std::move(*data), file);
+}
+
+Result<ReplacePlan> planReplaceData(const Session& session, const VfsNode& node, ByteBuffer data,
+                                    const QString& sourceName)
+{
+    if (!Vfs::canReplace(node))
+        return fail(ErrorCode::Unsupported, "{}", tr("This item can't be replaced.").toStdString());
 
     ReplacePlan plan;
     plan.node = &node;
-    plan.sourceFile = file;
-    plan.data = std::move(*data);
+    plan.sourceFile = sourceName;
+    plan.data = std::move(data);
 
     // If we know how to decode this type, make sure the new file decodes too —
     // catches e.g. a renamed PNG pretending to be a .texture.

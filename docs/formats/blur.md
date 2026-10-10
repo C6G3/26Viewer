@@ -170,13 +170,56 @@ Chunk file: `Texture { Header, Data }`.
 
 Observed mix: DXT1 75%, DXT5 22%, A8R8G8B8, DXT3, A8.
 
+## `.baf` — "BANK" audio bank ✅
+
+Little-endian. Decoded by `src/games/blur/BafBank.cpp`; all 319 banks (5,199 sounds,
+~320 minutes) decode with frame counts matching their headers.
+
+Header: `"BANK"`, u32 0x34, u32 4, u32 sound count, u16 0, char name[32] at 0x12.
+Then one `"WAVE"` record per sound: `"WAVE"`, u32 record size, u32 type, char name[32] at +12.
+
+| Type | Size | Fields (offsets from the record start) |
+|---|---|---|
+| 7 | 76 | +44 data offset, +48 data size, +52 f32 volume, +64 sample rate, +68 frames, +72 u16 loop flag, +74 u8 bits, +75 u8 channels — PlayStation-style ADPCM |
+| 3 | 80 | 16-bit PCM; +60 rate, +64 bits, +68 channels (all silent "sync" tracks) |
+
+ADPCM (decoder in Blur.exe at 0x540C80, tables at 0xE858F0 / 0xE85918): 33-byte frames,
+header byte `filter << 4 | shift`, then 32 bytes = 64 samples, low nibble first.
+`sample = nibble · 4096 · 2^-shift + h1·c1 + h2·c2` with float history and the filters
+{0,0}, {0.9375,0}, {1.796875,−0.8125}, {1.53125,−0.859375}, {1.90625,−0.9375}.
+Stereo alternates channels frame by frame.
+
+## `.model` geometry 🟡
+
+Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, Constr, Render { Header, Scene } }`.
+`StrTab` holds element names (`e_exterior`, `e_wheels`, `e_door_left`, …); `Scene` is an
+`ARCH` stream: a serialized object graph where every record starts with `"RA"` + u16 version.
+`src/games/blur/ModelDecoder.cpp` reads only the geometry records:
+
+| Record | Layout |
+|---|---|
+| vertex buffer | `RA00`, u32 n, u16 element offsets[n], u32 vertex count, blob |
+| index buffer | `RA01`, u32 index count, u32 0, blob of u16 |
+| blob | `RA00`, u32 byte size, u32 16, zero padding to the first 16-byte boundary (counted from `"ARCH"`) at least 5 bytes past the align field, data |
+| draw group | `RA00`, u32 n (LOD slots, 4 on cars), then n draws |
+| draw | `RA00`, u32 start index, u32 index count, u32 min index, u32 vertex count. Unused LOD slots are empty draws (count 0, min index 0x7FFFFFFF): the part isn't drawn at that level |
+| streams | right after a group (and its empty slots): `RA00`, u32 count (1–4), then `RA00`, u32 buffer number, u32 ?, u32 byte offset, u32 ? — byte offset / stride is the group's first vertex |
+
+- Draws tile each index buffer exactly; indices are triangle strips stitched with
+  degenerate triangles, or plain lists.
+- Buffer numbers are *not* file order: each number's buffer is solved from constraints
+  (all groups using it must fit; one buffer per number). Shadow-hull groups carry all-zero
+  streams, so a buffer that fits a group exactly wins over the mapped one.
+- Vertex element 0 is the position: 3 floats (12/16 bytes) or 4 halves (8 bytes).
+  Buffers with only a position are shadow hulls (`veh_Shadow.fx`).
+- 1,539 of 1,543 models decode; the other 4 contain no geometry.
+- Not yet: element names ↔ draw groups, materials (`veh_Paint…fx`, textures), UVs, normals.
+
 ## Other files
 
 | Ext | Magic / notes | Status |
 |---|---|---|
-| `.model` | chunk file `  CPModel { Header, MdlDat, Render }` + trailing data | 🟡 structure only |
 | `.cycle` / `.skeleton` | headerless binary (floats / bone indices) | ❓ |
-| `.baf` | `BANK` audio bank | ❓ |
 | `.dat` (audio) | `JBOA` | ❓ |
 | `.bpr` | `2RZB` compressed UI resource | ❓ |
 | `.ipf` | UI layout with named layers | ❓ |

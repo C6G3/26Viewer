@@ -6,6 +6,8 @@
 #include "viewer/core/RandomAccessFile.hpp"
 #include "viewer/core/Vfs.hpp"
 
+#include <format>
+
 #include <chrono>
 #include <filesystem>
 #include <print>
@@ -68,7 +70,10 @@ Usage:
                                                   Extract files, keeping folder structure
   26viewer-cli replace <archive> <entry path> <new file>
                                                   Replace one file inside an archive (keeps its name)
-  26viewer-cli backup  <file>                     Save the original as <file>.bak (once; never overwritten))");
+  26viewer-cli backup  <file>                     Save the original as <file>.bak (once; never overwritten)
+  26viewer-cli media   <archive|game dir> [filter] [out]
+                                                  Decode every audio bank and model (sanity check);
+                                                  with <out>, also write sounds as .wav and models as .obj)");
     return 2;
 }
 
@@ -273,6 +278,102 @@ int cmdBackup(const fs::path& file)
     return 0;
 }
 
+/// Wavefront OBJ text for a mesh's most detailed level (for checking geometry in any 3D tool).
+std::string toObj(const Mesh& mesh)
+{
+    std::string out;
+    for (std::size_t v = 0; v < mesh.vertexCount(); ++v)
+        out += std::format("v {} {} {}\n", mesh.positions[3 * v], mesh.positions[3 * v + 1], mesh.positions[3 * v + 2]);
+    for (const Mesh::Part& part : mesh.parts) {
+        if (part.shadow || part.lods.empty())
+            continue;
+        out += std::format("g {}\n", part.name);
+        const Mesh::Range& range = part.lods.front();
+        for (std::uint32_t i = range.firstIndex; i + 2 < range.firstIndex + range.indexCount; i += 3)
+            out += std::format("f {} {} {}\n", mesh.indices[i] + 1, mesh.indices[i + 1] + 1, mesh.indices[i + 2] + 1);
+    }
+    return out;
+}
+
+int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& outDir)
+{
+    Session s;
+    auto root = mount(s, target);
+    if (!root) {
+        std::println(stderr, "error: {}", root.error().message);
+        return 1;
+    }
+    std::size_t banks = 0, sounds = 0, models = 0, triangles = 0, failures = 0;
+    double seconds = 0;
+    const auto start = std::chrono::steady_clock::now();
+    for (const VfsNode* node : Vfs::collectFiles(**root)) {
+        if (!matches(*node, filter))
+            continue;
+        const std::string ext = extensionOf(node->name());
+        auto report = [&](const std::string& what) {
+            ++failures;
+            std::println(stderr, "FAIL {}: {}", node->virtualPath(), what);
+        };
+        auto source = Vfs::source(*node);
+        if (!source) {
+            report(source.error().message);
+            continue;
+        }
+        const auto headerSize = static_cast<std::size_t>(std::min<std::uint64_t>((*source)->size(), 4096));
+        auto header = (*source)->read(0, headerSize);
+        if (!header) {
+            report(header.error().message);
+            continue;
+        }
+        if (const SoundBankFormat* format = s.content.findSoundBankFormat(ext, *header)) {
+            auto bank = format->open(*source);
+            if (!bank) {
+                report(bank.error().message);
+                continue;
+            }
+            ++banks;
+            const auto infos = (*bank)->sounds();
+            for (std::size_t i = 0; i < infos.size(); ++i) {
+                auto clip = (*bank)->decode(i);
+                if (!clip) {
+                    report(std::format("{}: {}", infos[i].name, clip.error().message));
+                    continue;
+                }
+                if (clip->frames() != infos[i].frames)
+                    report(std::format("{}: decoded {} frames, header says {}", infos[i].name, clip->frames(),
+                                       infos[i].frames));
+                ++sounds;
+                seconds += clip->seconds();
+                if (!outDir.empty()) {
+                    const fs::path dest = outDir / sanitizeRelativePath(node->virtualPath()) / (infos[i].name + ".wav");
+                    if (auto ok = writeFile(dest, audio::encodeWav(*clip)); !ok)
+                        report(ok.error().message);
+                }
+            }
+        } else if (const MeshDecoder* decoder = s.content.findMeshDecoder(ext, *header)) {
+            auto data = s.vfs.read(*node);
+            auto mesh = data ? decoder->decode(*data) : Result<Mesh>(std::unexpected(data.error()));
+            if (!mesh) {
+                report(mesh.error().message);
+                continue;
+            }
+            ++models;
+            triangles += mesh->triangleCount();
+            if (!outDir.empty()) {
+                fs::path dest = outDir / sanitizeRelativePath(node->virtualPath());
+                dest.replace_extension(".obj");
+                const std::string obj = toObj(*mesh);
+                if (auto ok = writeFile(dest, asBytes(obj)); !ok)
+                    report(ok.error().message);
+            }
+        }
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+    std::println("{} bank(s), {} sound(s), {:.0f} min of audio; {} model(s), {} triangles; {} failure(s) in {:.1f}s",
+                 banks, sounds, seconds / 60.0, models, triangles, failures, ms.count() / 1000.0);
+    return failures ? 1 : 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -297,6 +398,8 @@ int main(int argc, char** argv)
         return cmdExtract(toPath(args[2]), toPath(args[3]), arg(4));
     if (cmd == "backup")
         return cmdBackup(toPath(args[2]));
+    if (cmd == "media")
+        return cmdMedia(toPath(args[2]), arg(3), args.size() >= 5 ? toPath(args[4]) : fs::path{});
     if (cmd == "replace" && args.size() >= 5)
         return cmdReplace(toPath(args[2]), args[3], toPath(args[4]));
     return usage();

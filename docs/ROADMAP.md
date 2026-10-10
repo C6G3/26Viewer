@@ -59,9 +59,11 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 ## Phase 4 — Deeper Blur support
 
 1. [ ] `ARCH` `.levelstream` archives (loose in `levels/`) → new `ArchiveFormat`
-2. [ ] `.model` geometry: decode `MdlDat`/`Render` chunks (vertex/index buffers)
-3. [ ] 3D preview tab: Qt RHI (`QRhiWidget`, Qt 6.7+) — orbit camera, textured meshes
-4. [ ] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia)
+2. [x] `.model` geometry: vertex/index buffers, all LODs, shadow hulls (see docs/formats/blur.md); next: part names, materials, UVs
+3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL); next: textures and game-accurate shading
+4. [x] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia); next: import WAVs / replace sounds
+4b. [x] Bink `.bik` video playback (Qt Multimedia FFmpeg backend), audio track picker
+4c. [x] Text viewer/editor: colour coding (XML, INI, CSV, JSON, Lua, shaders, QuickBMS), encodings round-trip, saving through Edit Mode
 5. [ ] Data tables (`.bin`, `.loc`, `.xt`) → table view
 6. [ ] `.bpr` (`2RZB`) UI packs, `.ipf` layouts, `.pf` fonts
 7. [x] PAK hashes (recovered from Blur.exe, see docs/formats/blur.md): digest = SHA-1(stored),

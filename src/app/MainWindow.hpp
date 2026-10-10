@@ -26,6 +26,7 @@ namespace viewer::app {
 
 class FolderView;
 class PreviewWindow;
+class TextEditorWindow;
 class ThemeManager;
 class VfsFilterModel;
 class VfsModel;
@@ -82,6 +83,8 @@ signals:
     void sessionChanged();
     /// A new preview window was opened (before its file finishes loading).
     void previewOpened(PreviewWindow* window);
+    /// A text editor window was opened.
+    void editorOpened(TextEditorWindow* window);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -130,6 +133,16 @@ private:
     [[nodiscard]] const VfsNode* findLocation(const QString& location) const;
     [[nodiscard]] std::vector<PreviewWindow*> previewWindows() const;
 
+    // Text editing (TextEditorWindow)
+    /// Whether `node` can be opened in the text editor; with `sniff`, files of
+    /// unknown type are read to check that they look like text.
+    [[nodiscard]] bool isEditableText(const VfsNode* node, bool sniff) const;
+    /// Opens `node` in a text editor window (or brings its open one forward).
+    void openTextEditor(const VfsNode* node);
+    [[nodiscard]] std::vector<TextEditorWindow*> editorWindows() const;
+    /// Writes an editor's text into the game (asks for Edit Mode and confirmation).
+    void saveEditedText(TextEditorWindow* editor, const QByteArray& bytes);
+
     void extract(bool everything);
     void extractNodes(const std::vector<const VfsNode*>& nodes);
     void onExtractFinished();
@@ -139,6 +152,9 @@ private:
     /// Asks for a replacement file for `node`, then replaces it.
     void replaceWithDialog(const VfsNode* node, QWidget* dialogParent);
     void replaceNode(const VfsNode* node, const QString& file, QWidget* dialogParent = nullptr);
+    /// Confirms a checked replacement with the user (backup choice) and starts it.
+    /// `edited`: the new contents are the user's own edits rather than a file.
+    bool confirmAndReplace(ReplacePlan plan, bool edited, QWidget* dialogParent);
     /// Why `file` can't replace `node` (empty if it can).
     [[nodiscard]] QString replaceRefusal(const VfsNode* node, const QString& file) const;
     void restoreOriginal();
@@ -183,6 +199,8 @@ private:
     QWidget* m_placeholder;
     FolderView* m_folderView;
     std::vector<QPointer<PreviewWindow>> m_previews; ///< Open preview windows (null once closed).
+    std::vector<QPointer<TextEditorWindow>> m_editors; ///< Open text editors (null once closed).
+    QPointer<TextEditorWindow> m_savingEditor; ///< The editor whose save is running.
     QLineEdit* m_search;
     QLabel* m_statusLabel;
     QProgressBar* m_progress;
@@ -198,6 +216,7 @@ private:
     QAction* m_revealAction = nullptr;
     QAction* m_replaceAction = nullptr;
     QAction* m_restoreAction = nullptr;
+    QAction* m_editTextAction = nullptr;
     QAction* m_reopenAction = nullptr;
     QAction* m_editModeAction = nullptr;
     QAction* m_backAction = nullptr;

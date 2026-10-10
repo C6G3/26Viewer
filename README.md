@@ -34,6 +34,12 @@ system, image decoders, the UI — is shared by every future game module.
 - **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`), text,
   a fast hex view, a **Structure** tab for chunked formats, and a **Properties**
   tab (compression, offsets, hashes…).
+  - **3D models** (Blur `.model`): orbit/pan/zoom, a parts tree to switch parts on
+    and off, solid / wireframe / grid / ground shadow, and a level-of-detail picker.
+  - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV.
+  - **Videos** (Bink `.bik`): playback with an audio-track picker.
+  - **Text** with line numbers, find, and colour coding (XML, INI, CSV, JSON, Lua,
+    shaders, QuickBMS). *Edit* opens a text editor; saving goes through Edit Mode.
 - **Extraction** of a selection or everything, on a background thread with
   progress and cancel; paths are sanitised so archives can never write outside
   the chosen folder.

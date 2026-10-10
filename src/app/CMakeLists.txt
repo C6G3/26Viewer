@@ -1,7 +1,7 @@
 # 26Viewer desktop application (Qt 6 Widgets).
 
 # Svg is linked so deployment picks up the SVG icon engine plugin.
-find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets Concurrent Svg)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets Concurrent Svg OpenGLWidgets Multimedia MultimediaWidgets)
 qt_standard_project_setup()
 
 qt_add_executable(viewer_app WIN32
@@ -25,6 +25,8 @@ qt_add_executable(viewer_app WIN32
     QtConvert.hpp
     Session.cpp
     Session.hpp
+    TextEditorWindow.cpp
+    TextEditorWindow.hpp
     Theme.cpp
     Theme.hpp
     VfsModel.cpp
@@ -33,8 +35,18 @@ qt_add_executable(viewer_app WIN32
     preview/HexView.hpp
     preview/ImageView.cpp
     preview/ImageView.hpp
+    preview/ModelView.cpp
+    preview/ModelView.hpp
     preview/PreviewPane.cpp
     preview/PreviewPane.hpp
+    preview/SoundBankView.cpp
+    preview/SoundBankView.hpp
+    preview/SyntaxHighlighter.cpp
+    preview/SyntaxHighlighter.hpp
+    preview/TextView.cpp
+    preview/TextView.hpp
+    preview/VideoView.cpp
+    preview/VideoView.hpp
 )
 set_target_properties(viewer_app PROPERTIES OUTPUT_NAME "26Viewer")
 
@@ -52,7 +64,7 @@ target_compile_definitions(viewer_app PRIVATE
     QT_DISABLE_DEPRECATED_UP_TO=0x060800)
 target_link_libraries(viewer_app PRIVATE
     viewer::core viewer::games viewer::options
-    Qt6::Widgets Qt6::Concurrent Qt6::Svg)
+    Qt6::Widgets Qt6::Concurrent Qt6::Svg Qt6::OpenGLWidgets Qt6::Multimedia Qt6::MultimediaWidgets)
 
 if(WIN32)
     get_target_property(_qmake Qt6::qmake IMPORTED_LOCATION)

@@ -4,17 +4,20 @@
 #include "../QtConvert.hpp"
 #include "HexView.hpp"
 #include "ImageView.hpp"
+#include "ModelView.hpp"
+#include "SoundBankView.hpp"
+#include "TextView.hpp"
+#include "VideoView.hpp"
+
+#include "viewer/core/Text.hpp"
 
 #include <QDateTime>
 #include <QDir>
-#include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLocale>
-#include <QPlainTextEdit>
 #include <QStackedWidget>
-#include <QStringDecoder>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTreeWidget>
@@ -41,6 +44,19 @@ struct PreviewResult {
 
     QString text;
     bool hasText = false;
+    TextSyntax syntax = TextSyntax::Plain;
+    QString textInfo; ///< "UTF-16 LE · CRLF"
+    bool textTruncated = false;
+
+    std::shared_ptr<const Mesh> mesh;
+    QString meshError;
+
+    std::shared_ptr<const SoundBank> bank;
+    QString bankError;
+
+    bool isVideo = false;
+    QString videoFile;     ///< On disk: streamed from there.
+    QByteArray videoData;  ///< Packed in an archive: played from memory.
 };
 
 namespace {
@@ -48,6 +64,7 @@ namespace {
 constexpr std::uint64_t kLooseReadLimit = 64ull << 20;    // hex/preview of big loose files
 constexpr std::uint64_t kPackedPreviewLimit = 512ull << 20; // packed entries must be read whole
 constexpr qsizetype kTextLimit = 4 << 20;
+constexpr std::uint64_t kHexOnlyLimit = 1ull << 20; // hex dump of audio banks / videos (the rest isn't needed)
 
 QString exactSize(std::uint64_t bytes)
 {
@@ -57,21 +74,70 @@ QString exactSize(std::uint64_t bytes)
              locale.formattedDataSize(static_cast<qint64>(bytes), 1, QLocale::DataSizeTraditionalFormat));
 }
 
-QString decodeText(const QByteArray& bytes)
+/// Decodes up to kTextLimit bytes of text and notes its encoding and line endings.
+void decodeTextInto(PreviewResult& r, ByteSpan data, const std::string& name)
 {
-    const QByteArray chunk = bytes.left(kTextLimit);
-    const auto encoding = QStringConverter::encodingForData(chunk); // BOM detection
-    QStringDecoder decoder(encoding.value_or(QStringConverter::Utf8));
-    QString text = decoder(chunk);
-    if (decoder.hasError())
-        text = QString::fromLatin1(chunk); // legacy 8-bit text
-    return text;
+    // Cut long files at an even length so UTF-16 isn't split mid-character.
+    const std::size_t limit = static_cast<std::size_t>(kTextLimit) & ~std::size_t{1};
+    r.textTruncated = data.size() > limit;
+    auto doc = decodeText(data.first(std::min(data.size(), limit)));
+    if (!doc) { // e.g. a UTF-8 BOM followed by invalid bytes
+        r.text = QString::fromLatin1(reinterpret_cast<const char*>(data.data()),
+                                     static_cast<qsizetype>(std::min(data.size(), limit)));
+        r.textInfo = QObject::tr("Unreadable text encoding (%1)").arg(toQString(doc.error().message));
+    } else {
+        r.text = toQString(doc->text);
+        r.textInfo = QStringLiteral("%1  ·  %2").arg(toQString(encodingName(doc->encoding)),
+                                                     doc->lineEnding == LineEnding::CRLF ? QStringLiteral("CRLF")
+                                                                                          : QStringLiteral("LF"));
+    }
+    r.syntax = syntaxFor(name, doc ? std::string_view(doc->text) : std::string_view{});
+    r.hasText = true;
 }
 
 std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, const VfsNode* node, quint64 generation)
 {
     auto r = std::make_shared<PreviewResult>();
     r->generation = generation;
+    const std::string ext = extensionOf(node->name());
+    const FileTypeInfo type = session->content.fileTypes().lookup(node->name());
+
+    // Audio banks and videos can be hundreds of MB: read only what's needed.
+    if (type.category == FileCategory::Audio || type.category == FileCategory::Video) {
+        auto source = Vfs::source(*node);
+        if (!source) {
+            r->error = toQString(source.error().message);
+            return r;
+        }
+        const auto head = (*source)->read(0, static_cast<std::size_t>(std::min((*source)->size(), kHexOnlyLimit)));
+        if (!head) {
+            r->error = toQString(head.error().message);
+            return r;
+        }
+        r->bytes = QByteArray(reinterpret_cast<const char*>(head->data()), static_cast<qsizetype>(head->size()));
+        r->truncated = (*source)->size() > head->size();
+        const ByteSpan header = ByteSpan(*head).first(std::min<std::size_t>(head->size(), 4096));
+        if (type.category == FileCategory::Audio) {
+            if (const SoundBankFormat* format = session->content.findSoundBankFormat(ext, header)) {
+                if (auto bank = format->open(*source))
+                    r->bank = std::shared_ptr<const SoundBank>(std::move(*bank));
+                else
+                    r->bankError = toQString(bank.error().message);
+            } else {
+                r->bankError = QObject::tr("This audio format isn't supported yet.");
+            }
+        } else {
+            r->isVideo = true;
+            if (!node->diskPath().empty()) {
+                r->videoFile = toQString(node->diskPath());
+            } else if ((*source)->size() <= kPackedPreviewLimit) {
+                if (auto all = (*source)->read(0, static_cast<std::size_t>((*source)->size())))
+                    r->videoData = QByteArray(reinterpret_cast<const char*>(all->data()),
+                                              static_cast<qsizetype>(all->size()));
+            }
+        }
+        return r;
+    }
 
     if (node->archive() && node->size() > kPackedPreviewLimit) {
         r->error = QObject::tr("This file is too large to preview (%1). Extract it instead.")
@@ -85,8 +151,6 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
     }
     r->truncated = !node->archive() && node->size() > data->size();
     const ByteSpan span(*data);
-    const std::string ext = extensionOf(node->name());
-    const FileTypeInfo type = session->content.fileTypes().lookup(node->name());
 
     // Image
     if (const ImageDecoder* decoder = session->content.findImageDecoder(ext, span)) {
@@ -120,13 +184,19 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
             r->structureError = toQString(s.error().message);
     }
 
+    // 3D model
+    if (const MeshDecoder* decoder = session->content.findMeshDecoder(ext, span)) {
+        if (auto mesh = decoder->decode(span))
+            r->mesh = std::make_shared<const Mesh>(std::move(*mesh));
+        else
+            r->meshError = toQString(mesh.error().message);
+    }
+
     r->bytes = QByteArray(reinterpret_cast<const char*>(data->data()), static_cast<qsizetype>(data->size()));
 
     // Text
-    if (r->image.isNull() && (type.category == FileCategory::Text || looksLikeText(span))) {
-        r->text = decodeText(r->bytes);
-        r->hasText = true;
-    }
+    if (r->image.isNull() && (type.category == FileCategory::Text || looksLikeText(span)))
+        decodeTextInto(*r, span, node->name());
     return r;
 }
 
@@ -153,7 +223,8 @@ PreviewPane::PreviewPane(QWidget* parent)
       m_title(new QLabel(this)), m_subtitle(new QLabel(this)),
       m_banner(new BackupBanner(this)), m_tabs(new QTabWidget(this)),
       m_previewStack(new QStackedWidget(this)), m_message(new QLabel(this)), m_image(new ImageView(this)),
-      m_text(new QPlainTextEdit(this)), m_structure(new QTreeWidget(this)), m_hex(new HexView(this)),
+      m_model(new ModelView(this)), m_bankView(new SoundBankView(this)), m_video(new VideoView(this)),
+      m_text(new TextView(this)), m_structure(new QTreeWidget(this)), m_hex(new HexView(this)),
       m_properties(new QTreeWidget(this))
 {
     // Header
@@ -169,15 +240,15 @@ PreviewPane::PreviewPane(QWidget* parent)
     m_message->setAlignment(Qt::AlignCenter);
     m_message->setWordWrap(true);
     m_message->setForegroundRole(QPalette::PlaceholderText);
-    m_text->setReadOnly(true);
-    m_text->setAcceptDrops(false); // dropped files go to the window (replace)
-    m_text->setLineWrapMode(QPlainTextEdit::NoWrap);
-    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    mono.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), mono.family()});
-    m_text->setFont(mono);
+    // Previews are read-only; "Edit" opens the file in a TextEditorWindow.
+    m_text->setEditButtonVisible(true);
+    connect(m_text, &TextView::editRequested, this, &PreviewPane::editRequested);
     m_previewStack->addWidget(m_message);
     m_previewStack->addWidget(m_image);
     m_previewStack->addWidget(m_text);
+    m_previewStack->addWidget(m_model);
+    m_previewStack->addWidget(m_bankView);
+    m_previewStack->addWidget(m_video);
 
     // Structure tab
     m_structure->setHeaderLabels({tr("Chunk"), tr("Offset"), tr("Size"), tr("Details")});
@@ -265,6 +336,9 @@ void PreviewPane::display(const VfsNode* node, int forcedTab)
     ++m_generation;
     m_image->clear();
     m_text->clear();
+    m_model->clear();
+    m_bankView->clear();
+    m_video->clear();
     m_structure->clear();
     m_hex->clear();
 
@@ -312,17 +386,40 @@ void PreviewPane::applyResult(const PreviewResult& result)
     if (!result.error.isEmpty()) {
         showMessage(result.error);
         hasPreview = false;
+    } else if (result.bank) {
+        m_bankView->setBank(result.bank, m_session);
+        m_previewStack->setCurrentWidget(m_bankView);
+    } else if (result.isVideo && (!result.videoFile.isEmpty() || !result.videoData.isEmpty())) {
+        if (!result.videoFile.isEmpty())
+            m_video->setFile(result.videoFile);
+        else
+            m_video->setData(result.videoData, m_node ? toQString(m_node->name()) : QString());
+        m_previewStack->setCurrentWidget(m_video);
+    } else if (result.mesh) {
+        m_model->setMesh(result.mesh);
+        m_previewStack->setCurrentWidget(m_model);
     } else if (!result.image.isNull()) {
         m_image->setImage(result.image, result.imageInfo);
         m_previewStack->setCurrentWidget(m_image);
     } else if (result.hasText) {
-        m_text->setPlainText(result.text);
+        const int lines = static_cast<int>(result.text.count(QLatin1Char('\n')) + 1);
+        QString info = result.textInfo + tr("  ·  %n line(s)", nullptr, lines);
+        if (result.textTruncated)
+            info += tr("  ·  showing the first %1").arg(QLocale().formattedDataSize(kTextLimit));
+        m_text->setText(result.text, result.syntax, info);
         m_previewStack->setCurrentWidget(m_text);
     } else {
         hasPreview = false;
-        showMessage(result.imageError.isEmpty()
-                        ? tr("No visual preview for this file type yet.\nSee the Structure and Hex tabs.")
-                        : tr("Could not decode image: %1").arg(result.imageError));
+        if (!result.bankError.isEmpty())
+            showMessage(tr("Could not read the audio: %1").arg(result.bankError));
+        else if (!result.meshError.isEmpty())
+            showMessage(tr("Could not read the model: %1").arg(result.meshError));
+        else if (result.isVideo)
+            showMessage(tr("This video is too large to play from inside an archive. Extract it instead."));
+        else
+            showMessage(result.imageError.isEmpty()
+                            ? tr("No visual preview for this file type yet.\nSee the Structure and Hex tabs.")
+                            : tr("Could not decode image: %1").arg(result.imageError));
     }
 
     // Respect the tab the user last chose, unless it has nothing to show.
@@ -414,6 +511,22 @@ void PreviewPane::fillProperties(const VfsNode* node, const PreviewResult* resul
     if (result && !result->image.isNull()) {
         section(tr("Image"));
         add(tr("Details"), result->imageInfo);
+    }
+    if (result && result->mesh) {
+        const QLocale locale;
+        section(tr("Model"));
+        add(tr("Vertices"), locale.toString(static_cast<qulonglong>(result->mesh->vertexCount())));
+        add(tr("Triangles"), locale.toString(static_cast<qulonglong>(result->mesh->triangleCount())));
+        add(tr("Parts"), locale.toString(static_cast<qulonglong>(result->mesh->parts.size())));
+        add(tr("Detail levels"), locale.toString(static_cast<qulonglong>(result->mesh->lodCount())));
+        for (const auto& note : result->mesh->notes)
+            add(tr("Note"), toQString(note));
+    }
+    if (result && result->bank) {
+        section(tr("Audio"));
+        add(tr("Format"), toQString(result->bank->formatName()));
+        for (const auto& p : result->bank->describe())
+            add(toQString(p.name), toQString(p.value));
     }
     if (result && result->truncated) {
         section(tr("Note"));

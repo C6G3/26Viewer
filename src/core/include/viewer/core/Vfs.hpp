@@ -103,6 +103,10 @@ public:
     /// entries are always read whole because they are compressed).
     [[nodiscard]] Result<ByteBuffer> read(const VfsNode& node, std::uint64_t limit = UINT64_MAX) const;
 
+    /// Random access to a file node (big containers: read only what's needed).
+    /// The source must not outlive this Vfs.
+    [[nodiscard]] static Result<std::shared_ptr<const ByteSource>> source(const VfsNode& node);
+
     /// Every file node at or beneath `node`, in tree order.
     [[nodiscard]] static std::vector<const VfsNode*> collectFiles(const VfsNode& node);
 

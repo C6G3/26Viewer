@@ -4,6 +4,8 @@
 
 add_library(viewer_core STATIC
     include/viewer/core/Archive.hpp
+    include/viewer/core/Audio.hpp
+    include/viewer/core/ByteSource.hpp
     include/viewer/core/Bytes.hpp
     include/viewer/core/Compression.hpp
     include/viewer/core/ContentRegistry.hpp
@@ -13,8 +15,13 @@ add_library(viewer_core STATIC
     include/viewer/core/GameRegistry.hpp
     include/viewer/core/Hash.hpp
     include/viewer/core/Image.hpp
+    include/viewer/core/Mesh.hpp
     include/viewer/core/RandomAccessFile.hpp
+    include/viewer/core/Text.hpp
     include/viewer/core/Vfs.hpp
+    src/Archive.cpp
+    src/Audio.cpp
+    src/ByteSource.cpp
     src/Bytes.cpp
     src/Compression.cpp
     src/ContentRegistry.cpp
@@ -22,7 +29,9 @@ add_library(viewer_core STATIC
     src/GameRegistry.cpp
     src/Hash.cpp
     src/Image.cpp
+    src/Mesh.cpp
     src/RandomAccessFile.cpp
+    src/Text.cpp
     src/Vfs.cpp
 )
 add_library(viewer::core ALIAS viewer_core)

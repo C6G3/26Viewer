@@ -51,6 +51,8 @@ signals:
     /// "Show in List": reveal the file in the main window.
     void revealRequested();
     void backupRequested();
+    /// "Edit" on a text preview: open this file in the text editor.
+    void editRequested();
 
 protected:
     void closeEvent(QCloseEvent* event) override;

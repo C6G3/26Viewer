@@ -1,9 +1,13 @@
 # Blur (Bizarre Creations, 2010)
 
 add_library(viewer_game_blur STATIC
+    BafBank.cpp
+    BafBank.hpp
     BlurGame.cpp
     ChunkFile.cpp
     ChunkFile.hpp
+    ModelDecoder.cpp
+    ModelDecoder.hpp
     PakArchive.cpp
     PakArchive.hpp
 )

@@ -24,6 +24,7 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     setAcceptDrops(true);
     setCentralWidget(m_pane);
     connect(m_pane, &PreviewPane::backupRequested, this, &PreviewWindow::backupRequested);
+    connect(m_pane, &PreviewPane::editRequested, this, &PreviewWindow::editRequested);
 
     m_revealAction = new QAction(icons::theme(TI::GoUp, QStyle::SP_FileDialogToParent), tr("Show in &List"), this);
     m_revealAction->setStatusTip(tr("Select this file in the main window"));

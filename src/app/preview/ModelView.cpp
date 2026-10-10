@@ -1,0 +1,712 @@
+#include "ModelView.hpp"
+
+#include "../Icons.hpp"
+#include "../QtConvert.hpp"
+
+#include <QCheckBox>
+#include <QComboBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QLocale>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QSettings>
+#include <QSplitter>
+#include <QToolButton>
+#include <QTreeWidget>
+#include <QVBoxLayout>
+#include <QWheelEvent>
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <set>
+#include <utility>
+
+namespace viewer::app {
+
+namespace {
+
+// GLSL 1.10 style (attribute/varying) so it runs on any desktop GL context,
+// including the software renderer used on machines without drivers.
+constexpr const char* kVertexShader = R"(
+attribute vec3 position;
+attribute vec3 normal;
+uniform mat4 mvp;
+uniform mat4 model;
+uniform mat3 normalMatrix;
+varying vec3 vNormal;
+void main() {
+    vNormal = normalMatrix * normal;
+    gl_Position = mvp * model * vec4(position, 1.0);
+}
+)";
+
+constexpr const char* kFragmentShader = R"(
+uniform vec3 color;
+uniform float lit;
+uniform float alpha;
+varying vec3 vNormal;
+void main() {
+    // Headlight: light comes from the camera; both faces lit (models are often single-sided).
+    float d = abs(normalize(vNormal).z);
+    vec3 shaded = color * (0.28 + 0.72 * d);
+    gl_FragColor = vec4(mix(color, shaded, lit), alpha);
+}
+)";
+
+QVector3D rgb(const QColor& c)
+{
+    return {static_cast<float>(c.redF()), static_cast<float>(c.greenF()), static_cast<float>(c.blueF())};
+}
+
+/// Squashes the model flat onto the ground (y = h) along a light from above:
+/// the ground shadow.
+QMatrix4x4 shadowMatrix(float h)
+{
+    const QVector3D light(0.55f, -1.0f, 0.35f); // direction the light travels
+    const float sx = light.x() / light.y();
+    const float sz = light.z() / light.y();
+    return QMatrix4x4(1, -sx, 0, sx * h, //
+                      0, 0, 0, h,        //
+                      0, -sz, 1, sz * h, //
+                      0, 0, 0, 1);
+}
+
+constexpr int kStride = 6 * sizeof(float);
+
+} // namespace
+
+// ---- ModelCanvas -------------------------------------------------------------------------
+
+ModelCanvas::ModelCanvas(QWidget* parent) : QOpenGLWidget(parent)
+{
+    setMinimumSize(200, 150);
+    setFocusPolicy(Qt::ClickFocus);
+    setCursor(Qt::OpenHandCursor);
+    setToolTip(tr("Drag to orbit · right-drag to pan · wheel to zoom · double-click to reset"));
+    QSurfaceFormat f = format();
+    f.setDepthBufferSize(24);
+    f.setStencilBufferSize(8); // the ground shadow darkens each pixel once
+    f.setSamples(4);           // smooth wireframe and grid lines
+    setFormat(f);
+}
+
+ModelCanvas::~ModelCanvas()
+{
+    makeCurrent();
+    m_vertices.destroy();
+    m_triangles.destroy();
+    m_edges.destroy();
+    m_gridLines.destroy();
+    doneCurrent();
+}
+
+void ModelCanvas::setMesh(std::shared_ptr<const Mesh> mesh)
+{
+    m_mesh = std::move(mesh);
+    m_dirty = true;
+    m_lod = 0;
+    m_visible.assign(m_mesh ? m_mesh->parts.size() : 0, true);
+    m_highlighted.assign(m_visible.size(), false);
+    // Bounds of the real geometry (not shadow hulls) → camera framing, grid and ground.
+    if (m_mesh && m_mesh->vertexCount()) {
+        QVector3D lo(1e30f, 1e30f, 1e30f), hi(-1e30f, -1e30f, -1e30f);
+        const auto include = [&](std::uint32_t v) {
+            const QVector3D p(m_mesh->positions[3 * v], m_mesh->positions[3 * v + 1], m_mesh->positions[3 * v + 2]);
+            lo = QVector3D(std::min(lo.x(), p.x()), std::min(lo.y(), p.y()), std::min(lo.z(), p.z()));
+            hi = QVector3D(std::max(hi.x(), p.x()), std::max(hi.y(), p.y()), std::max(hi.z(), p.z()));
+        };
+        for (const Mesh::Part& part : m_mesh->parts)
+            if (!part.shadow)
+                for (const Mesh::Range& r : part.lods)
+                    for (std::uint32_t i = r.firstIndex; i < r.firstIndex + r.indexCount; ++i)
+                        include(m_mesh->indices[i]);
+        if (lo.x() > hi.x()) // only shadow hulls: use everything
+            for (std::uint32_t v = 0; v < m_mesh->vertexCount(); ++v)
+                include(v);
+        m_center = (lo + hi) * 0.5f;
+        m_radius = std::max(0.001f, (hi - lo).length() * 0.5f);
+        m_ground = lo.y();
+        buildGrid(lo, hi);
+    }
+    resetView();
+}
+
+void ModelCanvas::buildGrid(const QVector3D& lo, const QVector3D& hi)
+{
+    // A "nice" spacing (…, 0.1, 1, 10, …) with every 5th line stronger.
+    const float spacing = std::pow(10.0f, std::floor(std::log10(std::max(m_radius / 2.0f, 1e-4f))));
+    const float margin = m_radius * 0.6f;
+    const auto from = [&](float v) { return std::floor((v - margin) / spacing); };
+    const auto to = [&](float v) { return std::ceil((v + margin) / spacing); };
+    const int x0 = static_cast<int>(from(lo.x())), x1 = static_cast<int>(to(hi.x()));
+    const int z0 = static_cast<int>(from(lo.z())), z1 = static_cast<int>(to(hi.z()));
+    std::vector<float> minor, major;
+    const auto line = [](std::vector<float>& out, float ax, float az, float bx, float bz, float y) {
+        out.insert(out.end(), {ax, y, az, 0, 1, 0, bx, y, bz, 0, 1, 0});
+    };
+    for (int i = x0; i <= x1; ++i)
+        line(i % 5 ? minor : major, i * spacing, z0 * spacing, i * spacing, z1 * spacing, m_ground);
+    for (int k = z0; k <= z1; ++k)
+        line(k % 5 ? minor : major, x0 * spacing, k * spacing, x1 * spacing, k * spacing, m_ground);
+    m_gridMinorPoints = static_cast<int>(minor.size() / 6);
+    m_gridMajorPoints = static_cast<int>(major.size() / 6);
+    m_gridData = std::move(minor);
+    m_gridData.insert(m_gridData.end(), major.begin(), major.end());
+}
+
+void ModelCanvas::setLod(int lod)
+{
+    m_lod = std::max(0, lod);
+    update();
+}
+
+void ModelCanvas::setVisibleParts(std::vector<bool> visible)
+{
+    m_visible = std::move(visible);
+    update();
+}
+
+void ModelCanvas::setHighlightedParts(std::vector<int> parts)
+{
+    m_highlighted.assign(m_visible.size(), false);
+    for (int p : parts)
+        if (p >= 0 && static_cast<std::size_t>(p) < m_highlighted.size())
+            m_highlighted[static_cast<std::size_t>(p)] = true;
+    update();
+}
+
+void ModelCanvas::setShowSolid(bool on)
+{
+    m_solid = on;
+    update();
+}
+
+void ModelCanvas::setShowWireframe(bool on)
+{
+    m_wireframe = on;
+    update();
+}
+
+void ModelCanvas::setShowGrid(bool on)
+{
+    m_grid = on;
+    update();
+}
+
+void ModelCanvas::setShowShadow(bool on)
+{
+    m_shadow = on;
+    update();
+}
+
+void ModelCanvas::resetView()
+{
+    m_target = m_center;
+    m_distance = m_radius * 2.6f;
+    m_yaw = -35.0f;
+    m_pitch = 20.0f;
+    update();
+}
+
+bool ModelCanvas::partVisible(std::size_t part) const
+{
+    return part < m_visible.size() && m_visible[part];
+}
+
+void ModelCanvas::initializeGL()
+{
+    initializeOpenGLFunctions();
+    m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, kVertexShader);
+    m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, kFragmentShader);
+    m_program.bindAttributeLocation("position", 0);
+    m_program.bindAttributeLocation("normal", 1);
+    m_glReady = m_program.link();
+    m_vertices.create();
+    m_triangles.create();
+    m_edges.create();
+    m_gridLines.create();
+    m_dirty = true;
+}
+
+void ModelCanvas::upload()
+{
+    m_dirty = false;
+    m_hasGeometry = false;
+    m_edgeRanges.clear();
+    if (!m_mesh || m_mesh->indices.empty())
+        return;
+    const Mesh& mesh = *m_mesh;
+
+    // Smooth normals (area weighted). Blur splits vertices at hard edges, so this matches the game closely.
+    // Lower detail levels reuse some of the same vertices with coarser triangles, so a
+    // vertex takes its normal from the most detailed level that uses it.
+    const auto pos = [&](std::uint32_t i) {
+        return QVector3D(mesh.positions[3 * i], mesh.positions[3 * i + 1], mesh.positions[3 * i + 2]);
+    };
+    std::vector<QVector3D> detailed(mesh.vertexCount()), coarse(mesh.vertexCount());
+    for (const Mesh::Part& part : mesh.parts)
+        for (std::size_t level = 0; level < part.lods.size(); ++level) {
+            auto& normals = level == 0 ? detailed : coarse;
+            const Mesh::Range& r = part.lods[level];
+            for (std::uint32_t t = r.firstIndex; t + 2 < r.firstIndex + r.indexCount; t += 3) {
+                const auto a = mesh.indices[t], b = mesh.indices[t + 1], c = mesh.indices[t + 2];
+                const QVector3D n = QVector3D::crossProduct(pos(b) - pos(a), pos(c) - pos(a));
+                normals[a] += n;
+                normals[b] += n;
+                normals[c] += n;
+            }
+        }
+    std::vector<float> interleaved;
+    interleaved.reserve(mesh.vertexCount() * 6);
+    for (std::size_t v = 0; v < mesh.vertexCount(); ++v) {
+        const QVector3D n = (detailed[v].isNull() ? coarse[v] : detailed[v]).normalized();
+        interleaved.insert(interleaved.end(), {mesh.positions[3 * v], mesh.positions[3 * v + 1],
+                                               mesh.positions[3 * v + 2], n.x(), n.y(), n.z()});
+    }
+    m_vertices.bind();
+    m_vertices.allocate(interleaved.data(), static_cast<int>(interleaved.size() * sizeof(float)));
+    m_triangles.bind();
+    m_triangles.allocate(mesh.indices.data(), static_cast<int>(mesh.indices.size() * sizeof(std::uint32_t)));
+
+    // Unique edges for the wireframe, per part and level.
+    std::vector<std::uint32_t> lines;
+    for (const Mesh::Part& part : mesh.parts) {
+        auto& ranges = m_edgeRanges.emplace_back();
+        for (const Mesh::Range& r : part.lods) {
+            std::set<std::pair<std::uint32_t, std::uint32_t>> edges;
+            for (std::uint32_t i = r.firstIndex; i + 2 < r.firstIndex + r.indexCount; i += 3)
+                for (int e = 0; e < 3; ++e) {
+                    const auto a = mesh.indices[i + e], b = mesh.indices[i + (e + 1) % 3];
+                    edges.emplace(std::min(a, b), std::max(a, b));
+                }
+            ranges.push_back({static_cast<int>(lines.size()), static_cast<int>(edges.size() * 2)});
+            for (const auto& [a, b] : edges)
+                lines.insert(lines.end(), {a, b});
+        }
+    }
+    m_edges.bind();
+    m_edges.allocate(lines.data(), static_cast<int>(lines.size() * sizeof(std::uint32_t)));
+
+    m_gridLines.bind();
+    m_gridLines.allocate(m_gridData.data(), static_cast<int>(m_gridData.size() * sizeof(float)));
+    m_hasGeometry = true;
+}
+
+QMatrix4x4 ModelCanvas::viewMatrix() const
+{
+    QMatrix4x4 view;
+    view.translate(0, 0, -m_distance);
+    view.rotate(m_pitch, 1, 0, 0);
+    view.rotate(m_yaw, 0, 1, 0);
+    view.translate(-m_target);
+    return view;
+}
+
+void ModelCanvas::bindVertices(QOpenGLBuffer& buffer)
+{
+    buffer.bind();
+    m_program.setAttributeBuffer(0, GL_FLOAT, 0, 3, kStride);
+    m_program.setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(float), 3, kStride);
+}
+
+void ModelCanvas::paintGL()
+{
+    const QColor background = palette().color(QPalette::Window);
+    glClearColor(static_cast<float>(background.redF()), static_cast<float>(background.greenF()),
+                 static_cast<float>(background.blueF()), 1.0f);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    if (!m_glReady)
+        return;
+    if (m_dirty)
+        upload();
+    if (!m_hasGeometry)
+        return;
+    const Mesh& mesh = *m_mesh;
+    const bool dark = background.lightnessF() < 0.5;
+
+    glEnable(GL_DEPTH_TEST);
+    // Near/far planes from the model size keep depth precision good for tiny and huge models.
+    QMatrix4x4 projection;
+    projection.perspective(45.0f, static_cast<float>(width()) / static_cast<float>(std::max(1, height())),
+                           std::max(m_distance - m_radius * 4.0f, m_radius * 0.01f), m_distance + m_radius * 4.0f);
+    const QMatrix4x4 view = viewMatrix();
+    m_program.bind();
+    m_program.setUniformValue("mvp", projection * view);
+    m_program.setUniformValue("model", QMatrix4x4());
+    m_program.setUniformValue("normalMatrix", view.normalMatrix());
+    m_program.setUniformValue("alpha", 1.0f);
+    m_program.enableAttributeArray(0);
+    m_program.enableAttributeArray(1);
+
+    const auto lodRange = [&](std::size_t part) -> const Mesh::Range* {
+        const auto& lods = mesh.parts[part].lods;
+        return static_cast<std::size_t>(m_lod) < lods.size() && lods[m_lod].indexCount ? &lods[m_lod] : nullptr;
+    };
+    const auto drawTriangles = [&](const Mesh::Range& r) {
+        glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(r.indexCount), GL_UNSIGNED_INT,
+                       reinterpret_cast<const void*>(static_cast<std::uintptr_t>(r.firstIndex) * sizeof(std::uint32_t)));
+    };
+
+    // Ground grid
+    if (m_grid && (m_gridMinorPoints || m_gridMajorPoints)) {
+        const QVector3D text = rgb(palette().color(QPalette::Text));
+        const QVector3D back = rgb(background);
+        m_program.setUniformValue("lit", 0.0f);
+        bindVertices(m_gridLines);
+        m_program.setUniformValue("color", back + (text - back) * 0.13f);
+        glDrawArrays(GL_LINES, 0, m_gridMinorPoints);
+        m_program.setUniformValue("color", back + (text - back) * 0.3f);
+        glDrawArrays(GL_LINES, m_gridMinorPoints, m_gridMajorPoints);
+    }
+
+    bindVertices(m_vertices);
+    m_triangles.bind();
+
+    // Ground shadow: the visible parts squashed onto the ground, each pixel darkened once.
+    if (m_shadow) {
+        m_program.setUniformValue("model", shadowMatrix(m_ground + m_radius * 0.002f));
+        m_program.setUniformValue("color", QVector3D(0, 0, 0));
+        m_program.setUniformValue("lit", 0.0f);
+        m_program.setUniformValue("alpha", dark ? 0.7f : 0.3f);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_STENCIL_TEST);
+        glStencilFunc(GL_EQUAL, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+        for (std::size_t p = 0; p < mesh.parts.size(); ++p)
+            if (partVisible(p) && !mesh.parts[p].shadow)
+                if (const Mesh::Range* r = lodRange(p))
+                    drawTriangles(*r);
+        glDisable(GL_STENCIL_TEST);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        m_program.setUniformValue("model", QMatrix4x4());
+        m_program.setUniformValue("alpha", 1.0f);
+    }
+
+    const QVector3D base = dark ? QVector3D(0.78f, 0.80f, 0.84f) : QVector3D(0.70f, 0.72f, 0.76f);
+    const QVector3D accent = rgb(palette().color(QPalette::Highlight));
+    const QVector3D hull(0.62f, 0.45f, 0.78f); // shadow hulls, when shown
+    if (m_solid) {
+        glEnable(GL_POLYGON_OFFSET_FILL); // keeps the wireframe overlay on top of the faces
+        glPolygonOffset(1.0f, 1.0f);
+        m_program.setUniformValue("lit", 1.0f);
+        for (std::size_t p = 0; p < mesh.parts.size(); ++p) {
+            const Mesh::Range* r = partVisible(p) ? lodRange(p) : nullptr;
+            if (!r)
+                continue;
+            const QVector3D c = mesh.parts[p].shadow ? hull : base;
+            m_program.setUniformValue("color", m_highlighted[p] ? c * 0.35f + accent * 0.65f : c);
+            drawTriangles(*r);
+        }
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
+    if (m_wireframe || !m_solid) {
+        const QVector3D line = m_solid ? rgb(palette().color(QPalette::Text)) * 0.6f : rgb(palette().color(QPalette::Text));
+        m_program.setUniformValue("lit", 0.0f);
+        m_edges.bind();
+        for (std::size_t p = 0; p < mesh.parts.size() && p < m_edgeRanges.size(); ++p) {
+            if (!partVisible(p) || !lodRange(p))
+                continue;
+            const EdgeRange& e = m_edgeRanges[p][static_cast<std::size_t>(m_lod)];
+            m_program.setUniformValue("color", m_highlighted[p] ? accent : line);
+            glDrawElements(GL_LINES, e.count, GL_UNSIGNED_INT,
+                           reinterpret_cast<const void*>(static_cast<std::uintptr_t>(e.first) * sizeof(std::uint32_t)));
+        }
+    }
+    m_program.disableAttributeArray(0);
+    m_program.disableAttributeArray(1);
+    m_program.release();
+}
+
+void ModelCanvas::mousePressEvent(QMouseEvent* event)
+{
+    m_lastMouse = event->position().toPoint();
+    setCursor(Qt::ClosedHandCursor);
+}
+
+void ModelCanvas::mouseMoveEvent(QMouseEvent* event)
+{
+    const QPoint pos = event->position().toPoint();
+    const QPoint delta = pos - m_lastMouse;
+    m_lastMouse = pos;
+    if (event->buttons() & Qt::LeftButton) {
+        m_yaw += static_cast<float>(delta.x()) * 0.4f;
+        m_pitch = std::clamp(m_pitch + static_cast<float>(delta.y()) * 0.4f, -89.0f, 89.0f);
+    } else if (event->buttons() & (Qt::RightButton | Qt::MiddleButton)) {
+        // Pan in the view plane, scaled so the model follows the cursor.
+        const float scale = m_distance * 2.0f * std::tan(qDegreesToRadians(22.5f)) / static_cast<float>(height());
+        const QMatrix4x4 inverse = viewMatrix().inverted();
+        const QVector3D right = inverse.mapVector({1, 0, 0});
+        const QVector3D up = inverse.mapVector({0, 1, 0});
+        m_target -= right * static_cast<float>(delta.x()) * scale;
+        m_target += up * static_cast<float>(delta.y()) * scale;
+    } else {
+        setCursor(Qt::OpenHandCursor);
+        return;
+    }
+    update();
+}
+
+void ModelCanvas::mouseDoubleClickEvent(QMouseEvent*)
+{
+    resetView();
+}
+
+void ModelCanvas::wheelEvent(QWheelEvent* event)
+{
+    const float steps = static_cast<float>(event->angleDelta().y()) / 120.0f;
+    m_distance = std::clamp(m_distance * std::pow(0.85f, steps), m_radius * 0.05f, m_radius * 50.0f);
+    update();
+}
+
+// ---- ModelView ---------------------------------------------------------------------------
+
+ModelView::ModelView(QWidget* parent)
+    : QWidget(parent), m_canvas(new ModelCanvas(this)), m_splitter(new QSplitter(this)),
+      m_parts(new QTreeWidget(this)), m_info(new QLabel(this)), m_solid(new QCheckBox(tr("Solid"), this)),
+      m_wireframe(new QCheckBox(tr("Wireframe"), this)), m_grid(new QCheckBox(tr("Grid"), this)),
+      m_shadow(new QCheckBox(tr("Shadow"), this)), m_lod(new QComboBox(this))
+{
+    m_info->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+    // Display options (remembered between files and runs).
+    QSettings settings;
+    const auto option = [&](QCheckBox* box, const char* key, bool fallback, const QString& tip,
+                            void (ModelCanvas::*apply)(bool)) {
+        box->setChecked(settings.value(QStringLiteral("preview/model/%1").arg(QLatin1String(key)), fallback).toBool());
+        box->setToolTip(tip);
+        (m_canvas->*apply)(box->isChecked());
+        connect(box, &QCheckBox::toggled, this, [this, key, apply](bool on) {
+            QSettings().setValue(QStringLiteral("preview/model/%1").arg(QLatin1String(key)), on);
+            (m_canvas->*apply)(on);
+        });
+    };
+    option(m_solid, "solid", true, tr("Draw the faces"), &ModelCanvas::setShowSolid);
+    option(m_wireframe, "wireframe", false, tr("Draw the triangle edges"), &ModelCanvas::setShowWireframe);
+    option(m_grid, "grid", true, tr("Ground grid (lines every 1, 10, 100… units; every 5th stronger)"),
+           &ModelCanvas::setShowGrid);
+    option(m_shadow, "shadow", true, tr("Soft shadow on the ground"), &ModelCanvas::setShowShadow);
+
+    m_lod->setToolTip(tr("Level of detail: what the game draws close up (LOD 0) or far away"));
+    connect(m_lod, &QComboBox::currentIndexChanged, this, [this](int lod) {
+        m_canvas->setLod(std::max(0, lod));
+        updateCounts();
+    });
+
+    auto* reset = new QToolButton(this);
+    reset->setIcon(icons::theme(QIcon::ThemeIcon::ZoomFitBest, QStyle::SP_TitleBarMaxButton));
+    reset->setToolTip(tr("Reset view (double-click the model)"));
+    reset->setAutoRaise(true);
+    connect(reset, &QToolButton::clicked, m_canvas, &ModelCanvas::resetView);
+
+    // Parts list: tick to show/hide; select to highlight in the view.
+    m_parts->setHeaderLabels({tr("Part"), tr("Triangles")});
+    m_parts->setUniformRowHeights(true);
+    m_parts->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_parts->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_parts->header()->setStretchLastSection(false);
+    m_parts->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_parts->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    connect(m_parts, &QTreeWidget::itemChanged, this, [this] {
+        if (!m_updatingTree)
+            applyVisibility();
+    });
+    connect(m_parts, &QTreeWidget::itemSelectionChanged, this, [this] {
+        std::vector<int> selected;
+        for (QTreeWidgetItem* item : m_parts->selectedItems()) {
+            if (const QVariant v = item->data(0, Qt::UserRole); v.isValid())
+                selected.push_back(v.toInt());
+            else // a group: all its parts
+                for (int i = 0; i < item->childCount(); ++i)
+                    selected.push_back(item->child(i)->data(0, Qt::UserRole).toInt());
+        }
+        m_canvas->setHighlightedParts(std::move(selected));
+    });
+    connect(m_parts, &QTreeWidget::customContextMenuRequested, this, &ModelView::showPartsMenu);
+
+    m_splitter->addWidget(m_parts);
+    m_splitter->addWidget(m_canvas);
+    m_splitter->setStretchFactor(0, 0);
+    m_splitter->setStretchFactor(1, 1);
+    m_splitter->setChildrenCollapsible(true);
+    if (!m_splitter->restoreState(settings.value("preview/model/splitter").toByteArray()))
+        m_splitter->setSizes({260, 800});
+    connect(m_splitter, &QSplitter::splitterMoved, this,
+            [this] { QSettings().setValue("preview/model/splitter", m_splitter->saveState()); });
+
+    auto* bar = new QHBoxLayout;
+    bar->setContentsMargins(8, 4, 8, 4);
+    bar->addWidget(m_info, 1);
+    bar->addWidget(m_solid);
+    bar->addWidget(m_wireframe);
+    bar->addWidget(m_grid);
+    bar->addWidget(m_shadow);
+    bar->addSpacing(8);
+    bar->addWidget(m_lod);
+    bar->addWidget(reset);
+
+    auto* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addLayout(bar);
+    layout->addWidget(m_splitter, 1);
+}
+
+void ModelView::setMesh(std::shared_ptr<const Mesh> mesh)
+{
+    m_mesh = std::move(mesh);
+    m_canvas->setMesh(m_mesh);
+    {
+        const QSignalBlocker block(m_lod);
+        m_lod->clear();
+        const int levels = m_mesh ? static_cast<int>(m_mesh->lodCount()) : 0;
+        for (int i = 0; i < levels; ++i)
+            m_lod->addItem(i == 0 && levels > 1   ? tr("LOD 0 (most detail)")
+                           : i == levels - 1 && i ? tr("LOD %1 (least detail)").arg(i)
+                                                  : tr("LOD %1").arg(i));
+        m_lod->setEnabled(levels > 1);
+    }
+    buildTree();
+    applyVisibility();
+    updateCounts();
+}
+
+void ModelView::clear()
+{
+    setMesh(nullptr);
+}
+
+void ModelView::buildTree()
+{
+    m_updatingTree = true;
+    m_parts->clear();
+    m_partItems.clear();
+    if (m_mesh) {
+        // One folder per group, in the order the groups first appear; shadow hulls last and off.
+        std::map<std::string, QTreeWidgetItem*> folders;
+        std::vector<std::pair<std::string, bool>> order;
+        for (const Mesh::Part& part : m_mesh->parts)
+            if (!folders.contains(part.group)) {
+                folders[part.group] = nullptr;
+                order.emplace_back(part.group, part.shadow);
+            }
+        std::ranges::stable_partition(order, [](const auto& g) { return !g.second; });
+        for (const auto& [name, shadow] : order) {
+            auto* folder = new QTreeWidgetItem(m_parts, {toQString(name)});
+            folder->setToolTip(0, toQString(name));
+            folder->setFlags(folder->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate);
+            folder->setCheckState(0, shadow ? Qt::Unchecked : Qt::Checked);
+            folder->setIcon(0, icons::forCategory(FileCategory::Model));
+            folders[name] = folder;
+        }
+        for (std::size_t i = 0; i < m_mesh->parts.size(); ++i) {
+            const Mesh::Part& part = m_mesh->parts[i];
+            auto* item = new QTreeWidgetItem(folders[part.group], {toQString(part.name)});
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(0, part.shadow ? Qt::Unchecked : Qt::Checked);
+            item->setData(0, Qt::UserRole, static_cast<int>(i));
+            item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+            m_partItems.push_back(item);
+        }
+        if (m_parts->topLevelItemCount() <= 4)
+            m_parts->expandAll();
+    }
+    m_updatingTree = false;
+}
+
+void ModelView::updateCounts()
+{
+    if (!m_mesh) {
+        m_info->clear();
+        return;
+    }
+    const QLocale locale;
+    const auto lod = static_cast<std::size_t>(std::max(0, m_lod->currentIndex()));
+    std::size_t shown = 0;
+    m_updatingTree = true;
+    for (std::size_t i = 0; i < m_partItems.size(); ++i) {
+        const auto& lods = m_mesh->parts[i].lods;
+        const std::uint32_t triangles = lod < lods.size() ? lods[lod].indexCount / 3 : 0;
+        m_partItems[i]->setText(1, triangles ? locale.toString(triangles) : QStringLiteral("—"));
+        m_partItems[i]->setToolTip(1, triangles ? QString() : tr("Not drawn at this level of detail"));
+        if (m_partItems[i]->checkState(0) == Qt::Checked)
+            shown += triangles;
+    }
+    for (int f = 0; f < m_parts->topLevelItemCount(); ++f) { // folders: their parts' total
+        QTreeWidgetItem* folder = m_parts->topLevelItem(f);
+        std::size_t total = 0;
+        for (int c = 0; c < folder->childCount(); ++c) {
+            const auto& lods = m_mesh->parts[static_cast<std::size_t>(folder->child(c)->data(0, Qt::UserRole).toInt())].lods;
+            total += lod < lods.size() ? lods[lod].indexCount / 3 : 0;
+        }
+        folder->setText(1, locale.toString(static_cast<qulonglong>(total)));
+        folder->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+    }
+    m_updatingTree = false;
+    m_info->setText(tr("%1 vertices  ·  %2 triangles shown  ·  %n part(s)", nullptr,
+                       static_cast<int>(m_mesh->parts.size()))
+                        .arg(locale.toString(static_cast<qulonglong>(m_mesh->vertexCount())),
+                             locale.toString(static_cast<qulonglong>(shown))));
+}
+
+void ModelView::applyVisibility()
+{
+    std::vector<bool> visible(m_partItems.size());
+    for (std::size_t i = 0; i < m_partItems.size(); ++i)
+        visible[i] = m_partItems[i]->checkState(0) == Qt::Checked;
+    m_canvas->setVisibleParts(std::move(visible));
+    updateCounts();
+}
+
+void ModelView::setAllParts(bool on, bool includeShadows)
+{
+    m_updatingTree = true;
+    for (std::size_t i = 0; i < m_partItems.size(); ++i)
+        if (includeShadows || !m_mesh->parts[i].shadow)
+            m_partItems[i]->setCheckState(0, on ? Qt::Checked : Qt::Unchecked);
+        else
+            m_partItems[i]->setCheckState(0, Qt::Unchecked);
+    m_updatingTree = false;
+    applyVisibility();
+}
+
+void ModelView::showPartsMenu(const QPoint& pos)
+{
+    if (!m_mesh)
+        return;
+    QMenu menu(this);
+    const QList<QTreeWidgetItem*> selected = m_parts->selectedItems();
+    if (!selected.isEmpty()) {
+        menu.addAction(tr("Show &Only Selected"), this, [this, selected] {
+            std::set<int> keep;
+            for (QTreeWidgetItem* item : selected) {
+                if (const QVariant v = item->data(0, Qt::UserRole); v.isValid())
+                    keep.insert(v.toInt());
+                else
+                    for (int i = 0; i < item->childCount(); ++i)
+                        keep.insert(item->child(i)->data(0, Qt::UserRole).toInt());
+            }
+            m_updatingTree = true;
+            for (std::size_t i = 0; i < m_partItems.size(); ++i)
+                m_partItems[i]->setCheckState(0, keep.contains(static_cast<int>(i)) ? Qt::Checked : Qt::Unchecked);
+            m_updatingTree = false;
+            applyVisibility();
+        });
+        menu.addSeparator();
+    }
+    menu.addAction(tr("Show &All Parts"), this, [this] { setAllParts(true, false); });
+    menu.addAction(tr("Show All Including &Shadow Hulls"), this, [this] { setAllParts(true, true); });
+    menu.addAction(tr("&Hide All"), this, [this] { setAllParts(false, true); });
+    menu.addSeparator();
+    menu.addAction(tr("&Expand All"), m_parts, &QTreeWidget::expandAll);
+    menu.addAction(tr("&Collapse All"), m_parts, &QTreeWidget::collapseAll);
+    menu.exec(m_parts->viewport()->mapToGlobal(pos));
+}
+
+} // namespace viewer::app

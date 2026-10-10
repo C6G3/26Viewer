@@ -3,7 +3,7 @@
 #
 #   dist/<preset>/26Viewer.exe, 26viewer-cli.exe
 #                 Qt6*.dll + every MinGW/MSYS2 DLL they need
-#                 platforms/ styles/ imageformats/ iconengines/ ...
+#                 platforms/ styles/ imageformats/ iconengines/ multimedia/ (FFmpeg) ...
 #
 # Inputs (set by install(CODE) in src/app/CMakeLists.txt):
 #   VIEWER_WINDEPLOYQT   path to windeployqt6.exe
@@ -21,7 +21,8 @@ if(VIEWER_WINDEPLOYQT)
     message(STATUS "Deploy: running windeployqt")
     execute_process(
         COMMAND "${VIEWER_WINDEPLOYQT}" --release --no-translations --no-system-d3d-compiler
-                --no-opengl-sw --no-network --skip-plugin-types tls,networkinformation,generic
+                --no-opengl-sw --skip-plugin-types tls,networkinformation,generic
+                --add-plugin-types multimedia
                 --dir "${_prefix}" "${_app}"
         RESULT_VARIABLE _rc OUTPUT_QUIET)
     if(NOT _rc EQUAL 0)

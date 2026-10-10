@@ -1,6 +1,8 @@
 // Blur (Bizarre Creations, 2010) — game module entry point.
 
+#include "BafBank.hpp"
 #include "ChunkFile.hpp"
+#include "ModelDecoder.hpp"
 #include "PakArchive.hpp"
 
 #include "viewer/core/GameRegistry.hpp"
@@ -46,6 +48,8 @@ public:
         registry.addArchiveFormat(std::make_shared<PakFormat>());
         registry.addImageDecoder(std::make_shared<TextureDecoder>());
         registry.addStructureParser(std::make_shared<ChunkStructureParser>());
+        registry.addMeshDecoder(std::make_shared<ModelDecoder>());
+        registry.addSoundBankFormat(std::make_shared<BafFormat>());
 
         auto& t = registry.fileTypes();
         t.add({"pak", "Blur package", FileCategory::Archive});
@@ -69,7 +73,7 @@ public:
         t.add({"bin", "Game data table", FileCategory::Data});
         t.add({"xt", "Data table", FileCategory::Data});
         t.add({"aid", "AI data", FileCategory::Data});
-        t.add({"wbl", "Data", FileCategory::Data});
+        t.add({"wbl", "Audio bank list", FileCategory::Text});
         t.add({"raw", "Raw data", FileCategory::Data});
         t.add({"sig", "Signature", FileCategory::Data});
     }

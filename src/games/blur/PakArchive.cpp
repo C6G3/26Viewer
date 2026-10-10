@@ -247,6 +247,16 @@ Result<ByteBuffer> PakArchive::read(std::size_t index) const
     return readChunked(*raw, size);
 }
 
+Result<std::shared_ptr<const ByteSource>> PakArchive::openEntry(std::size_t index) const
+{
+    if (index >= m_entries.size())
+        return fail(ErrorCode::NotFound, "entry {} out of range", index);
+    const Slot& slot = m_slots[index];
+    if (m_version >= 2 && slot.storedSize == m_entries[index].size)
+        return fileSliceSource(*m_file, slot.dataOffset, slot.storedSize);
+    return Archive::openEntry(index);
+}
+
 Result<ByteBuffer> PakArchive::readChunked(ByteSpan raw, std::size_t size) const
 {
     BinaryReader r(raw);

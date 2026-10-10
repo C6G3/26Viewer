@@ -8,7 +8,6 @@
 #include <memory>
 
 class QLabel;
-class QPlainTextEdit;
 class QPushButton;
 class QStackedWidget;
 class QTabWidget;
@@ -19,6 +18,10 @@ namespace viewer::app {
 class BackupBanner;
 class HexView;
 class ImageView;
+class ModelView;
+class SoundBankView;
+class TextView;
+class VideoView;
 struct PreviewResult;
 
 /// The contents of a PreviewWindow: Preview / Structure / Hex / Properties.
@@ -51,6 +54,8 @@ signals:
     void previewReady();
     /// The user clicked "Back Up Now" on the banner.
     void backupRequested();
+    /// The user clicked "Edit" on a text file's preview.
+    void editRequested();
 
 private:
     enum Tab { PreviewTab, StructureTab, HexTab, PropertiesTab };
@@ -74,7 +79,10 @@ private:
     QStackedWidget* m_previewStack;
     QLabel* m_message;
     ImageView* m_image;
-    QPlainTextEdit* m_text;
+    ModelView* m_model;
+    SoundBankView* m_bankView;
+    VideoView* m_video;
+    TextView* m_text;
     QTreeWidget* m_structure;
     HexView* m_hex;
     QTreeWidget* m_properties;

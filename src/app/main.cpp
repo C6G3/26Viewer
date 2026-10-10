@@ -2,6 +2,7 @@
 
 #include "MainWindow.hpp"
 #include "PreviewWindow.hpp"
+#include "TextEditorWindow.hpp"
 #include "Theme.hpp"
 #include "preview/PreviewPane.hpp"
 
@@ -35,7 +36,8 @@ Options parseArguments(const QApplication& app)
     const QCommandLineOption select(QStringLiteral("select"), QStringLiteral("Virtual path to select after loading."),
                                     QStringLiteral("path"));
     const QCommandLineOption tab(QStringLiteral("tab"),
-                                 QStringLiteral("Preview tab to show: preview, structure, hex or properties."),
+                                 QStringLiteral("Preview tab to show: preview, structure, hex or properties "
+                                                "(or edit: open a text file in the editor)."),
                                  QStringLiteral("name"));
     const QCommandLineOption theme(QStringLiteral("theme"),
                                    QStringLiteral("Theme for this run only: system, light or dark."),
@@ -55,7 +57,7 @@ Options parseArguments(const QApplication& app)
     o.screenshot = parser.value(screenshot);
     o.theme = parser.value(theme).toLower();
     o.editMode = parser.isSet(editMode);
-    const QStringList tabs{"preview", "structure", "hex", "properties"};
+    const QStringList tabs{"preview", "structure", "hex", "properties", "edit"};
     o.tab = tabs.indexOf(parser.value(tab).toLower());
     return o;
 }
@@ -70,15 +72,27 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
             QApplication::quit();
         });
     };
+    constexpr int kEditTab = 4;
     QObject::connect(&window, &viewer::app::MainWindow::sessionChanged, &window, [&window, o, capture] {
         auto opened = std::make_shared<bool>(false);
         QObject::connect(&window, &viewer::app::MainWindow::previewOpened, &window,
-                         [o, capture, opened](viewer::app::PreviewWindow* preview) {
+                         [&window, o, capture, opened](viewer::app::PreviewWindow* preview) {
                              *opened = true;
                              preview->resize(1100, 800);
                              auto* pane = preview->pane();
                              QObject::connect(pane, &viewer::app::PreviewPane::previewReady, preview,
-                                              [pane, preview, o, capture] {
+                                              [&window, pane, preview, o, capture] {
+                                                  if (o.tab == kEditTab) { // the text editor's picture instead
+                                                      QObject::connect(&window, &viewer::app::MainWindow::editorOpened,
+                                                                       &window,
+                                                                       [capture](QWidget* editor) {
+                                                                           editor->resize(1100, 800);
+                                                                           capture(editor);
+                                                                       },
+                                                                       Qt::SingleShotConnection);
+                                                      emit pane->editRequested();
+                                                      return;
+                                                  }
                                                   if (o.tab >= 0)
                                                       pane->setCurrentTab(o.tab);
                                                   capture(preview);

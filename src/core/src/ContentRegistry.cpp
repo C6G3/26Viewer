@@ -21,6 +21,16 @@ void ContentRegistry::addStructureParser(std::shared_ptr<const StructureParser> 
     m_structureParsers.push_back(std::move(parser));
 }
 
+void ContentRegistry::addMeshDecoder(std::shared_ptr<const MeshDecoder> decoder)
+{
+    m_meshDecoders.push_back(std::move(decoder));
+}
+
+void ContentRegistry::addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format)
+{
+    m_soundBankFormats.push_back(std::move(format));
+}
+
 const ArchiveFormat* ContentRegistry::findArchiveFormat(const std::filesystem::path& path) const
 {
     const auto ext = extensionOf(path);
@@ -58,6 +68,22 @@ const StructureParser* ContentRegistry::findStructureParser(std::string_view ext
     return nullptr;
 }
 
+const MeshDecoder* ContentRegistry::findMeshDecoder(std::string_view extension, ByteSpan data) const
+{
+    for (const auto& d : m_meshDecoders | std::views::reverse)
+        if (d->canDecode(extension, data))
+            return d.get();
+    return nullptr;
+}
+
+const SoundBankFormat* ContentRegistry::findSoundBankFormat(std::string_view extension, ByteSpan header) const
+{
+    for (const auto& f : m_soundBankFormats | std::views::reverse)
+        if (f->canOpen(extension, header))
+            return f.get();
+    return nullptr;
+}
+
 namespace {
 
 class DdsDecoder final : public ImageDecoder {
@@ -80,7 +106,8 @@ void registerBuiltinContent(ContentRegistry& registry)
     t.add({"jpg", "JPEG image", FileCategory::Texture});
     t.add({"tga", "Targa image", FileCategory::Texture});
     t.add({"bmp", "Bitmap image", FileCategory::Texture});
-    for (const char* ext : {"txt", "ini", "cfg", "csv", "xml", "json", "lua", "log", "html", "htm"})
+    for (const char* ext : {"txt", "ini", "cfg", "csv", "tsv", "xml", "json", "lua", "log", "html", "htm", "md",
+                            "yaml", "yml", "toml", "bms", "fx", "fxh", "hlsl", "glsl", "bat", "cmd"})
         t.add({ext, "Text document (." + std::string(ext) + ")", FileCategory::Text});
     t.add({"bik", "Bink video", FileCategory::Video});
     t.add({"bk2", "Bink 2 video", FileCategory::Video});
@@ -93,6 +120,7 @@ void registerBuiltinContent(ContentRegistry& registry)
     t.add({"zip", "ZIP archive", FileCategory::Archive});
 
     registry.addImageDecoder(std::make_shared<DdsDecoder>());
+    registry.addSoundBankFormat(audio::wavFormat());
 }
 
 bool looksLikeText(ByteSpan data) noexcept

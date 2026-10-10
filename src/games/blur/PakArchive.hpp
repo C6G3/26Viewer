@@ -18,6 +18,8 @@ public:
     const std::filesystem::path& path() const noexcept override { return m_file->path(); }
     std::span<const ArchiveEntry> entries() const noexcept override { return m_entries; }
     Result<ByteBuffer> read(std::size_t index) const override;
+    /// Uncompressed entries (e.g. streaming audio banks) are read in place.
+    Result<std::shared_ptr<const ByteSource>> openEntry(std::size_t index) const override;
     PropertyList describeEntry(std::size_t index) const override;
     PropertyList describe() const override;
 

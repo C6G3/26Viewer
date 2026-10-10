@@ -34,6 +34,11 @@ struct ReplacePlan {
 /// plan, or an error message suitable for showing to the user.
 Result<ReplacePlan> planReplace(const Session& session, const VfsNode& node, const QString& file);
 
+/// The same checks for new contents already in memory (e.g. text edited in
+/// the editor); `sourceName` describes where they came from.
+Result<ReplacePlan> planReplaceData(const Session& session, const VfsNode& node, ByteBuffer data,
+                                    const QString& sourceName);
+
 /// The file on disk whose backup protects `node`: its archive, the archive
 /// itself for archive nodes, or the loose file. Empty for folders on disk.
 [[nodiscard]] std::filesystem::path backupTarget(const VfsNode& node);

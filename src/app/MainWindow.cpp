@@ -8,8 +8,10 @@
 #include "Theme.hpp"
 #include "VfsModel.hpp"
 #include "PreviewWindow.hpp"
+#include "TextEditorWindow.hpp"
 #include "preview/PreviewPane.hpp"
 
+#include "viewer/core/ContentRegistry.hpp"
 #include "viewer/core/RandomAccessFile.hpp"
 
 #include <QApplication>
@@ -148,6 +150,8 @@ MainWindow::~MainWindow()
 {
     for (PreviewWindow* w : previewWindows()) // top-level windows without a parent
         delete w;
+    for (TextEditorWindow* w : editorWindows())
+        delete w;
     m_loadWatcher->waitForFinished();
     m_mountWatcher->waitForFinished();
     m_extractWatcher->waitForFinished();
@@ -218,6 +222,15 @@ void MainWindow::buildActions()
     m_restoreAction->setStatusTip(tr("Put back the original archive / file from its .bak backup"));
     connect(m_restoreAction, &QAction::triggered, this, &MainWindow::restoreOriginal);
 
+    m_editTextAction = new QAction(icons::theme(TI::DocumentProperties, QStyle::SP_FileDialogDetailedView),
+                                   tr("&Edit Text…"), this);
+    m_editTextAction->setShortcut(QKeySequence(Qt::Key_F4));
+    m_editTextAction->setStatusTip(tr("Open the selected text file in the text editor (saving needs Edit Mode)"));
+    connect(m_editTextAction, &QAction::triggered, this, [this] {
+        if (const auto nodes = selectedNodes(); nodes.size() == 1)
+            openTextEditor(nodes.front());
+    });
+
     m_editModeAction = new QAction(icons::editMode(), tr("Edit &Mode"), this);
     m_editModeAction->setCheckable(true);
     m_editModeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
@@ -270,6 +283,7 @@ void MainWindow::buildActions()
     edit->addAction(m_editModeAction);
     edit->addSeparator();
     edit->addAction(m_replaceAction);
+    edit->addAction(m_editTextAction);
     edit->addAction(m_restoreAction);
     edit->addSeparator();
     edit->addAction(m_copyPathAction);
@@ -689,6 +703,9 @@ void MainWindow::closeMount(const VfsNode* top)
             w->close();
         }
     }
+    for (TextEditorWindow* w : editorWindows())
+        if (w->node() && m_model->topOf(w->node()) == top)
+            w->rebind(nullptr, nullptr);
     if (m_folderView->folder() && m_model->topOf(m_folderView->folder()) == top)
         navigateTo(&m_session->vfs.root());
     m_model->removeRoot(m_model->rootRow(top));
@@ -736,6 +753,8 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
     // about to be restored or rewritten), then follow their file into the new one.
     for (PreviewWindow* w : previewWindows())
         w->setSession(nullptr);
+    for (TextEditorWindow* w : editorWindows())
+        w->rebind(nullptr, nullptr);
     m_model->setRoots({}, nullptr);
     m_session = std::move(session);
     if (m_session) {
@@ -752,6 +771,9 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
                 w->close(); // the file is gone (or another game was opened)
             }
         }
+        // Editors keep their text either way; Save needs the file to still be there.
+        for (TextEditorWindow* w : editorWindows())
+            w->rebind(m_session, findLocation(w->location()));
         m_leftStack->setCurrentWidget(m_tree);
         m_tree->expand(m_treeFilter->index(0, 0)); // the game's top level
         m_tree->setCurrentIndex(m_treeFilter->index(0, 0));
@@ -909,11 +931,105 @@ PreviewWindow* MainWindow::openPreview(const VfsNode* node, bool properties)
         }
     });
     connect(w, &PreviewWindow::backupRequested, this, [this, w] { backupNode(w->node()); });
+    connect(w, &PreviewWindow::editRequested, this, [this, w] { openTextEditor(w->node()); });
 
     updateBackupBanner();
     w->show();
     emit previewOpened(w);
     return w;
+}
+
+// ---- Text editor ------------------------------------------------------------------------------
+
+std::vector<TextEditorWindow*> MainWindow::editorWindows() const
+{
+    std::vector<TextEditorWindow*> windows;
+    for (const auto& w : m_editors)
+        if (w)
+            windows.push_back(w);
+    return windows;
+}
+
+bool MainWindow::isEditableText(const VfsNode* node, bool sniff) const
+{
+    if (!m_session || !node || !node->isFile())
+        return false;
+    const FileCategory category = m_session->content.fileTypes().lookup(node->name()).category;
+    if (category == FileCategory::Text)
+        return true;
+    // Unknown types may still be text (configs with odd extensions): peek at the start.
+    if (!sniff || (category != FileCategory::Unknown && category != FileCategory::Data) || node->size() > (16u << 20))
+        return false;
+    const auto head = m_session->vfs.read(*node, 4096);
+    return head && !head->empty() && looksLikeText(*head);
+}
+
+void MainWindow::openTextEditor(const VfsNode* node)
+{
+    if (!node || !m_session)
+        return;
+    const QString location = locationOf(node);
+    for (TextEditorWindow* w : editorWindows()) {
+        if (w->location() == location) {
+            if (w->isMinimized())
+                w->showNormal();
+            w->raise();
+            w->activateWindow();
+            return;
+        }
+    }
+
+    auto* w = new TextEditorWindow();
+    if (const QString error = w->open(m_session, node, location); !error.isEmpty()) {
+        delete w;
+        QMessageBox::information(QApplication::activeWindow(), tr("Edit Text"), error);
+        return;
+    }
+    std::erase_if(m_editors, [](const QPointer<TextEditorWindow>& p) { return p.isNull(); });
+    m_editors.emplace_back(w);
+    if (m_offscreen)
+        w->setAttribute(Qt::WA_DontShowOnScreen);
+    connect(w, &TextEditorWindow::saveRequested, this,
+            [this, w](const QByteArray& bytes) { saveEditedText(w, bytes); });
+    connect(w, &TextEditorWindow::revealRequested, this, [this, w] {
+        if (selectPath(w->location(), /*openFile=*/false)) {
+            raise();
+            activateWindow();
+        }
+    });
+    w->show();
+    emit editorOpened(w);
+}
+
+void MainWindow::saveEditedText(TextEditorWindow* editor, const QByteArray& bytes)
+{
+    const VfsNode* node = editor->node();
+    if (!m_session || !node || m_editWatcher->isRunning() || m_loadWatcher->isRunning()) {
+        QMessageBox::information(editor, tr("Save"), tr("26Viewer is busy — try saving again in a moment."));
+        editor->saveFinished(false);
+        return;
+    }
+    if (!m_editMode) {
+        // Saving writes into the game's files, which only Edit Mode allows.
+        setEditMode(true);
+        if (!m_editMode) {
+            editor->saveFinished(false);
+            return;
+        }
+    }
+    ByteBuffer contents(static_cast<std::size_t>(bytes.size()));
+    std::memcpy(contents.data(), bytes.constData(), contents.size());
+    auto plan = planReplaceData(*m_session, *node, std::move(contents), tr("your edited text"));
+    if (!plan) {
+        QMessageBox::warning(editor, tr("Save"), toQString(plan.error().message));
+        editor->saveFinished(false);
+        return;
+    }
+    if (!confirmAndReplace(std::move(*plan), /*edited=*/true, editor)) {
+        editor->saveFinished(false);
+        return;
+    }
+    m_savingEditor = editor;
 }
 
 void MainWindow::goBack()
@@ -1067,52 +1183,66 @@ void MainWindow::replaceNode(const VfsNode* node, const QString& file, QWidget* 
         QMessageBox::warning(parent, tr("Replace"), toQString(plan.error().message));
         return;
     }
+    confirmAndReplace(std::move(*plan), /*edited=*/false, parent);
+}
 
+bool MainWindow::confirmAndReplace(ReplacePlan plan, bool edited, QWidget* dialogParent)
+{
+    const VfsNode* node = plan.node;
+    QWidget* parent = dialogParent ? dialogParent : this;
+    const QString title = edited ? tr("Save") : tr("Replace");
     const QLocale locale;
     const QString where = node->archive() ? tr("inside <b>%1</b>").arg(toQString(node->archive()->path().filename()))
                                           : tr("on disk");
-    QString text = tr("Replace <b>%1</b> %2 with <b>%3</b>?<br><br>Size: %4 → %5")
-                       .arg(toQString(node->name()).toHtmlEscaped(), where, QFileInfo(file).fileName().toHtmlEscaped(),
-                            locale.formattedDataSize(static_cast<qint64>(node->size())),
-                            locale.formattedDataSize(static_cast<qint64>(plan->data.size())));
-    if (!plan->warning.isEmpty())
-        text += QStringLiteral("<br><br>⚠ ") + plan->warning.toHtmlEscaped();
+    const QString name = toQString(node->name()).toHtmlEscaped();
+    QString text = edited ? tr("Save your changes to <b>%1</b> %2?").arg(name, where)
+                          : tr("Replace <b>%1</b> %2 with <b>%3</b>?")
+                                .arg(name, where, QFileInfo(plan.sourceFile).fileName().toHtmlEscaped());
+    text += tr("<br><br>Size: %1 → %2")
+                .arg(locale.formattedDataSize(static_cast<qint64>(node->size())),
+                     locale.formattedDataSize(static_cast<qint64>(plan.data.size())));
+    if (!plan.warning.isEmpty())
+        text += QStringLiteral("<br><br>⚠ ") + plan.warning.toHtmlEscaped();
 
     // No automatic backups: if there isn't one, say so and offer to make it.
     const auto target = Vfs::editTarget(*node);
     const bool backedUp = hasBackup(*node);
-    QMessageBox box(QMessageBox::Question, tr("Replace"), QString(), QMessageBox::Cancel, parent);
+    QMessageBox box(QMessageBox::Question, title, QString(), QMessageBox::Cancel, parent);
     QPushButton* replace = nullptr;
     QPushButton* backupAndReplace = nullptr;
     if (backedUp) {
         text += tr("<br><br>The original is backed up as %1.").arg(toQString(backupPathFor(target).filename()));
-        replace = box.addButton(tr("Replace"), QMessageBox::AcceptRole);
+        replace = box.addButton(title, QMessageBox::AcceptRole);
     } else {
         box.setIcon(QMessageBox::Warning);
         text += tr("<br><br><b style='color:#C42B1C'>%1 is not backed up — this change can't be undone.</b>")
                     .arg(toQString(target.filename()).toHtmlEscaped());
-        backupAndReplace = box.addButton(tr("Back Up && Replace"), QMessageBox::AcceptRole);
-        replace = box.addButton(tr("Replace Without Backup"), QMessageBox::DestructiveRole);
+        backupAndReplace = box.addButton(edited ? tr("Back Up && Save") : tr("Back Up && Replace"),
+                                         QMessageBox::AcceptRole);
+        replace = box.addButton(edited ? tr("Save Without Backup") : tr("Replace Without Backup"),
+                                QMessageBox::DestructiveRole);
     }
     box.setText(text);
-    if (!plan->warning.isEmpty())
+    if (!plan.warning.isEmpty())
         box.setDefaultButton(QMessageBox::Cancel);
     else
         box.setDefaultButton(backupAndReplace ? backupAndReplace : replace);
     box.exec();
     if (box.clickedButton() == backupAndReplace && backupAndReplace)
-        plan->backupFirst = true;
+        plan.backupFirst = true;
     else if (box.clickedButton() != replace)
-        return;
+        return false;
 
     // After the reload: select it again (open preview windows follow on their own).
     m_pendingSelect = locationOf(node);
-    m_statusLabel->setText(tr("Replacing %1…").arg(toQString(node->name())));
+    m_statusLabel->setText(edited ? tr("Saving %1…").arg(toQString(node->name()))
+                                  : tr("Replacing %1…").arg(toQString(node->name())));
     m_progress->setRange(0, 0);
     m_progress->show();
     QApplication::setOverrideCursor(Qt::BusyCursor);
-    m_editWatcher->setFuture(startReplace(m_session, std::move(*plan)));
+    m_editWatcher->setFuture(startReplace(m_session, std::move(plan)));
     updateActions();
+    return true;
 }
 
 void MainWindow::restoreOriginal()
@@ -1165,9 +1295,11 @@ void MainWindow::onEditFinished()
     }
 
     if (!result.error.isEmpty()) {
-        QMessageBox::warning(this, appName(), result.error);
+        QMessageBox::warning(m_savingEditor ? static_cast<QWidget*>(m_savingEditor) : this, appName(), result.error);
         m_statusLabel->setText(tr("Edit failed"));
     }
+    if (TextEditorWindow* editor = std::exchange(m_savingEditor, nullptr))
+        editor->saveFinished(result.error.isEmpty());
     if (m_reopen) { // a restore closed the session: open it again
         const auto [game, source, extras] = *std::exchange(m_reopen, std::nullopt);
         openSource(game, source, extras, std::exchange(m_pendingSelect, QString()));
@@ -1319,6 +1451,7 @@ void MainWindow::updateActions()
     m_editModeAction->setEnabled(!editing);
     m_replaceAction->setEnabled(m_editMode && !busy && single && Vfs::canReplace(*single));
     m_restoreAction->setEnabled(m_editMode && !busy && single && hasBackup(*single));
+    m_editTextAction->setEnabled(isEditableText(single, /*sniff=*/false));
     m_copyPathAction->setEnabled(!nodes.empty());
     m_revealAction->setEnabled(single && !single->diskPath().empty());
     m_openAction->setEnabled(single != nullptr);
@@ -1366,6 +1499,10 @@ void MainWindow::showListContextMenu(const QPoint& globalPos)
         menu.addAction(m_openAction);
         menu.setDefaultAction(m_openAction);
         menu.addSeparator();
+    }
+    if (nodes.size() == 1 && isEditableText(nodes.front(), /*sniff=*/true)) {
+        m_editTextAction->setEnabled(true);
+        menu.addAction(m_editTextAction);
     }
     menu.addAction(m_extractAction);
     menu.addAction(m_replaceAction);
@@ -1450,6 +1587,12 @@ void MainWindow::onExtractFinished()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    for (TextEditorWindow* w : editorWindows()) {
+        if (!w->close()) { // unsaved changes and the user cancelled (or a save is running)
+            event->ignore();
+            return;
+        }
+    }
     if (m_extractWatcher->isRunning()) {
         m_extractWatcher->cancel();
         m_extractWatcher->waitForFinished();
