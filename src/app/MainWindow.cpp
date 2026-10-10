@@ -1,5 +1,7 @@
 #include "MainWindow.hpp"
 
+#include "BackupBanner.hpp"
+#include "FolderView.hpp"
 #include "GamePickerDialog.hpp"
 #include "Icons.hpp"
 #include "QtConvert.hpp"
@@ -61,14 +63,15 @@ MainWindow::MainWindow(const GameRegistry& games, ThemeManager& theme, QWidget* 
     : QMainWindow(parent), m_games(games), m_theme(theme), m_loadWatcher(new QFutureWatcher<LoadResult>(this)),
       m_extractWatcher(new QFutureWatcher<ExtractSummary>(this)),
       m_editWatcher(new QFutureWatcher<EditResult>(this)), m_model(new VfsModel(this)),
-      m_filter(new VfsFilterModel(this)), m_leftStack(nullptr), m_tree(nullptr), m_placeholder(nullptr),
-      m_preview(nullptr), m_search(nullptr), m_statusLabel(new QLabel(this)), m_progress(new QProgressBar(this)),
+      m_treeFilter(new VfsFilterModel(this)), m_leftStack(nullptr), m_tree(nullptr), m_placeholder(nullptr),
+      m_rightStack(nullptr), m_folderView(nullptr), m_preview(nullptr), m_search(nullptr), m_statusLabel(new QLabel(this)), m_progress(new QProgressBar(this)),
       m_cancel(new QToolButton(this))
 {
     setWindowTitle(appName());
     setWindowIcon(icons::appIcon());
     setAcceptDrops(true);
-    m_filter->setSourceModel(m_model);
+    m_treeFilter->setSourceModel(m_model);
+    m_treeFilter->setContainersOnly(true);
 
     buildActions();
     buildUi();
@@ -82,6 +85,8 @@ MainWindow::MainWindow(const GameRegistry& games, ThemeManager& theme, QWidget* 
     connect(m_extractWatcher, &QFutureWatcher<ExtractSummary>::progressTextChanged, this,
             [this](const QString& text) { m_statusLabel->setText(tr("Extracting %1…").arg(text)); });
     connect(m_editWatcher, &QFutureWatcher<EditResult>::finished, this, &MainWindow::onEditFinished);
+    // Which pane has focus decides what "selected" means (see selectedNodes).
+    connect(qApp, &QApplication::focusChanged, this, &MainWindow::updateActions);
 
     QSettings settings;
     if (!restoreGeometry(settings.value("window/geometry").toByteArray()))
@@ -162,6 +167,27 @@ void MainWindow::buildActions()
     m_editModeAction->setStatusTip(tr("Unlock replacing and restoring game files"));
     connect(m_editModeAction, &QAction::triggered, this, [this](bool on) { setEditMode(on); });
 
+    m_openAction = new QAction(icons::theme(TI::DocumentOpen, QStyle::SP_DialogOpenButton), tr("&Open"), this);
+    connect(m_openAction, &QAction::triggered, this, [this] {
+        if (const auto nodes = selectedNodes(); nodes.size() == 1)
+            activateNode(nodes.front());
+    });
+
+    m_propertiesAction = new QAction(icons::theme(TI::DocumentProperties, QStyle::SP_FileDialogInfoView),
+                                     tr("P&roperties"), this);
+    m_propertiesAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Return));
+    connect(m_propertiesAction, &QAction::triggered, this, [this] {
+        if (const auto nodes = selectedNodes(); nodes.size() == 1)
+            openPreview(nodes.front(), /*properties=*/true);
+    });
+
+    // Backspace / Alt+Left: preview → folder list → parent folder. Scoped to
+    // the right-hand pane so Backspace still edits the search box.
+    m_backAction = new QAction(icons::theme(TI::GoPrevious, QStyle::SP_ArrowBack), tr("&Back"), this);
+    m_backAction->setShortcuts({QKeySequence(Qt::Key_Backspace), QKeySequence(QKeySequence::Back)});
+    m_backAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+    connect(m_backAction, &QAction::triggered, this, &MainWindow::goBack);
+
     m_reopenAction = new QAction(tr("Reopen Last Game at &Startup"), this);
     m_reopenAction->setCheckable(true);
     m_reopenAction->setChecked(QSettings().value("session/reopenOnStartup", true).toBool());
@@ -199,6 +225,9 @@ void MainWindow::buildActions()
     });
 
     QMenu* view = menuBar()->addMenu(tr("&View"));
+    view->addAction(m_backAction);
+    view->addAction(m_propertiesAction);
+    view->addSeparator();
     QAction* expand = view->addAction(tr("&Expand All"));
     connect(expand, &QAction::triggered, this, [this] { m_tree->expandAll(); });
     QAction* collapse = view->addAction(tr("&Collapse All"));
@@ -273,7 +302,7 @@ void MainWindow::buildUi()
     toolbar->addWidget(gap);
 
     m_search = new QLineEdit(toolbar);
-    m_search->setPlaceholderText(tr("Filter files  (Ctrl+F)"));
+    m_search->setPlaceholderText(tr("Search this folder  (Ctrl+F)"));
     m_search->setClearButtonEnabled(true);
     m_search->setMinimumWidth(260);
     m_search->addAction(icons::theme(QIcon::ThemeIcon::SystemSearch, QStyle::SP_FileDialogContentsView),
@@ -286,55 +315,68 @@ void MainWindow::buildUi()
     filterTimer->setInterval(200);
     connect(m_search, &QLineEdit::textChanged, filterTimer, qOverload<>(&QTimer::start));
     connect(filterTimer, &QTimer::timeout, this, [this] {
-        const QString text = m_search->text().trimmed();
-        m_filter->setFilterFixedString(text);
-        if (text.isEmpty()) {
-            m_tree->collapseAll();
-            m_tree->expandToDepth(0);
-        } else {
-            m_tree->expandAll();
-        }
+        showList();
+        m_folderView->setFilterText(m_search->text().trimmed());
+        updateActions();
     });
 
-    // Tree
+    // Navigation tree: folders and archives only (their contents go in the list).
     m_tree = new QTreeView(this);
-    m_tree->setModel(m_filter);
+    m_tree->setModel(m_treeFilter);
+    m_tree->setHeaderHidden(true);
+    for (int column = VfsModel::Type; column < VfsModel::ColumnCount; ++column)
+        m_tree->setColumnHidden(column, true);
     m_tree->setUniformRowHeights(true);
     m_tree->setSortingEnabled(true);
     m_tree->sortByColumn(VfsModel::Name, Qt::AscendingOrder);
-    m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_tree->setAlternatingRowColors(false);
-    // Files dragged from Explorer onto an item replace it (see eventFilter).
-    m_tree->setAcceptDrops(true);
-    m_tree->viewport()->setAcceptDrops(true);
-    m_tree->viewport()->installEventFilter(this);
-    configureTreeHeader();
-    m_tree->header()->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_tree->header(), &QHeaderView::customContextMenuRequested, this, &MainWindow::showHeaderMenu);
     connect(m_tree, &QTreeView::customContextMenuRequested, this, &MainWindow::showTreeContextMenu);
     connect(m_tree->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& index) {
-        m_preview->showNode(VfsModel::nodeFromIndex(m_filter->mapToSource(index)));
+        showList();
+        m_folderView->setFolder(VfsModel::nodeFromIndex(m_treeFilter->mapToSource(index)));
         updateBackupBanner();
+        updateActions();
     });
-    connect(m_tree->selectionModel(), &QItemSelectionModel::selectionChanged, this, &MainWindow::updateActions);
 
     m_placeholder = buildPlaceholder();
     m_leftStack = new QStackedWidget(this);
     m_leftStack->addWidget(m_placeholder);
     m_leftStack->addWidget(m_tree);
 
+    // Right: the open folder's contents; double-click a file to preview it.
+    m_folderView = new FolderView(m_model, this);
+    m_folderView->setPlaceholder(QString(), tr("Open a game or an archive to see its contents here."));
+    m_folderView->restoreHeaderState(QSettings().value("window/listHeader").toByteArray());
+    QTreeView* list = m_folderView->view();
+    // Files dragged from Explorer onto an item replace it (see eventFilter).
+    list->setAcceptDrops(true);
+    list->viewport()->setAcceptDrops(true);
+    list->viewport()->installEventFilter(this);
+    connect(m_folderView, &FolderView::activated, this, &MainWindow::activateNode);
+    connect(m_folderView, &FolderView::navigateRequested, this,
+            [this](const VfsNode* folder) { navigateTo(folder, m_folderView->folder()); });
+    connect(m_folderView, &FolderView::selectionChanged, this, &MainWindow::updateActions);
+    connect(m_folderView, &FolderView::contextMenuRequested, this, &MainWindow::showListContextMenu);
+    connect(m_folderView->banner(), &BackupBanner::backupRequested, this, &MainWindow::backupCurrent);
+
     m_preview = new PreviewPane(this);
+    connect(m_preview, &PreviewPane::backRequested, this, &MainWindow::showList);
+
+    m_rightStack = new QStackedWidget(this);
+    m_rightStack->addWidget(m_folderView);
+    m_rightStack->addWidget(m_preview);
+    m_rightStack->addAction(m_backAction);
 
     auto* splitter = new QSplitter(Qt::Horizontal, this);
     splitter->setObjectName("mainSplitter");
     splitter->addWidget(m_leftStack);
-    splitter->addWidget(m_preview);
-    splitter->setStretchFactor(0, 1);
+    splitter->addWidget(m_rightStack);
+    splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setChildrenCollapsible(false);
-    if (!splitter->restoreState(QSettings().value("window/splitter").toByteArray()))
-        splitter->setSizes({640, 760});
+    if (!splitter->restoreState(QSettings().value("window/browserSplitter").toByteArray()))
+        splitter->setSizes({340, 1060});
     setCentralWidget(splitter);
 
     // Status bar
@@ -364,39 +406,6 @@ void MainWindow::buildUi()
     statusBar()->addPermanentWidget(m_editModeBadge);
 
     connect(m_preview, &PreviewPane::backupRequested, this, &MainWindow::backupCurrent);
-}
-
-void MainWindow::configureTreeHeader()
-{
-    // QHeaderView drops per-section resize modes on a model reset, so this
-    // runs at startup and again whenever a session is attached.
-    QHeaderView* header = m_tree->header();
-    header->setStretchLastSection(false);
-    header->setMinimumSectionSize(60);
-    const QByteArray saved = QSettings().value("window/treeHeader").toByteArray();
-    if (saved.isEmpty() || !header->restoreState(saved)) {
-        header->resizeSection(VfsModel::Type, 140);
-        header->resizeSection(VfsModel::Size, 80);
-        header->resizeSection(VfsModel::Packed, 80);
-        header->resizeSection(VfsModel::Modified, 140);
-        header->setSectionHidden(VfsModel::Modified, true); // available via the header menu
-    }
-    header->setSectionResizeMode(QHeaderView::Interactive);
-    header->setSectionResizeMode(VfsModel::Name, QHeaderView::Stretch);
-}
-
-void MainWindow::showHeaderMenu(const QPoint& pos)
-{
-    QHeaderView* header = m_tree->header();
-    QMenu menu(this);
-    for (int column = VfsModel::Type; column < VfsModel::ColumnCount; ++column) {
-        QAction* action = menu.addAction(m_model->headerData(column, Qt::Horizontal).toString());
-        action->setCheckable(true);
-        action->setChecked(!header->isSectionHidden(column));
-        connect(action, &QAction::toggled, header,
-                [header, column](bool visible) { header->setSectionHidden(column, !visible); });
-    }
-    menu.exec(header->viewport()->mapToGlobal(pos));
 }
 
 // ---- Opening -------------------------------------------------------------------------------
@@ -509,15 +518,18 @@ void MainWindow::onLoadFinished()
 
 void MainWindow::setSession(std::shared_ptr<Session> session)
 {
+    showList();
     m_preview->setSession(nullptr);
     m_model->setSource(nullptr, nullptr);
     m_session = std::move(session);
     if (m_session) {
-        m_model->setSource(&m_session->vfs.root(), &m_session->content);
-        configureTreeHeader();
+        m_model->setSource(&m_session->vfs.root(), &m_session->content, m_session->title(),
+                           m_session->game ? icons::theme(QIcon::ThemeIcon::InputGaming, QStyle::SP_DirIcon)
+                                           : QIcon());
         m_preview->setSession(m_session);
         m_leftStack->setCurrentWidget(m_tree);
         m_tree->expandToDepth(0);
+        m_tree->setCurrentIndex(m_treeFilter->index(0, 0)); // the game's top level
         setWindowTitle(QStringLiteral("%1 — %2").arg(m_session->title(), appName()));
         const VfsNode& root = m_session->vfs.root();
         m_statusLabel->setText(tr("%1  ·  %n archive(s)", nullptr, static_cast<int>(m_session->report.archives))
@@ -526,9 +538,10 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
                                + QStringLiteral("  ·  %1").arg(sizeText(root.size())));
         rememberSession();
         if (!m_pendingSelect.isEmpty()) {
-            selectPath(m_pendingSelect);
+            selectPath(m_pendingSelect, m_pendingOpen);
             m_pendingSelect.clear();
         }
+        m_pendingOpen = true;
     } else {
         m_leftStack->setCurrentWidget(m_placeholder);
         setWindowTitle(appName());
@@ -539,7 +552,7 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
     emit sessionChanged();
 }
 
-bool MainWindow::selectPath(const QString& virtualPath)
+bool MainWindow::selectPath(const QString& virtualPath, bool openFile)
 {
     if (!m_session)
         return false;
@@ -553,12 +566,94 @@ bool MainWindow::selectPath(const QString& virtualPath)
             return false;
         node = next;
     }
-    const QModelIndex index = m_filter->mapFromSource(m_model->indexForNode(node));
-    if (!index.isValid())
-        return false;
-    m_tree->setCurrentIndex(index);
-    m_tree->scrollTo(index, QAbstractItemView::PositionAtCenter);
+    if (node->isContainer()) {
+        navigateTo(node);
+        return true;
+    }
+    navigateTo(node->parent());
+    m_folderView->selectNode(node);
+    if (openFile)
+        openPreview(node);
     return true;
+}
+
+// ---- Browsing ----------------------------------------------------------------------------------
+
+bool MainWindow::previewShowing() const
+{
+    return m_rightStack->currentWidget() == m_preview;
+}
+
+const VfsNode* MainWindow::treeNode() const
+{
+    return VfsModel::nodeFromIndex(m_treeFilter->mapToSource(m_tree->currentIndex()));
+}
+
+void MainWindow::navigateTo(const VfsNode* folder, const VfsNode* reveal)
+{
+    const QModelIndex index = m_treeFilter->mapFromSource(m_model->indexForNode(folder));
+    if (!index.isValid())
+        return;
+    if (m_tree->currentIndex() == index)
+        showList();
+    else
+        m_tree->setCurrentIndex(index); // updates the list (see buildUi)
+    m_tree->scrollTo(index); // also expands the tree down to it
+
+    // Coming back up: highlight the child we came from, like Explorer does.
+    while (reveal && reveal->parent() != folder)
+        reveal = reveal->parent();
+    if (reveal)
+        m_folderView->selectNode(reveal);
+}
+
+void MainWindow::activateNode(const VfsNode* node)
+{
+    if (!node)
+        return;
+    if (node->isContainer())
+        navigateTo(node);
+    else
+        openPreview(node);
+}
+
+void MainWindow::openPreview(const VfsNode* node, bool properties)
+{
+    if (!node)
+        return;
+    if (properties)
+        m_preview->showProperties(node);
+    else
+        m_preview->showNode(node);
+    const VfsNode* folder = m_folderView->folder();
+    m_preview->setBackTarget(folder ? m_model->data(m_model->indexForNode(folder)).toString() : tr("folder"));
+    m_rightStack->setCurrentWidget(m_preview);
+    updateBackupBanner();
+    updateActions();
+}
+
+void MainWindow::showList()
+{
+    if (!previewShowing())
+        return;
+    const VfsNode* shown = m_preview->node();
+    m_rightStack->setCurrentWidget(m_folderView);
+    m_preview->showNode(nullptr); // stop loading / free the decoded file
+    if (shown)
+        m_folderView->selectNode(shown); // keep your place in the list
+    m_folderView->view()->setFocus();
+    updateBackupBanner();
+    updateActions();
+}
+
+void MainWindow::goBack()
+{
+    if (previewShowing()) {
+        showList();
+        return;
+    }
+    if (const VfsNode* folder = m_folderView->folder(); folder && folder->parent())
+        navigateTo(folder->parent(), folder);
 }
 
 // ---- Remembering the last session -------------------------------------------------------------
@@ -585,6 +680,7 @@ bool MainWindow::reopenLastSession()
         return false;
 
     m_pendingSelect = settings.value("session/selection").toString();
+    m_pendingOpen = settings.value("session/previewOpen", true).toBool();
     if (kind == "game") {
         const Game* game = m_games.find(settings.value("session/game").toString().toStdString());
         if (!game)
@@ -641,16 +737,20 @@ void MainWindow::setEditMode(bool on, bool confirm)
 
 const VfsNode* MainWindow::currentNode() const
 {
-    return m_session ? VfsModel::nodeFromIndex(m_filter->mapToSource(m_tree->currentIndex())) : nullptr;
+    if (!m_session)
+        return nullptr;
+    return previewShowing() ? m_preview->node() : m_folderView->folder();
 }
 
 void MainWindow::updateBackupBanner()
 {
-    const VfsNode* node = currentNode();
-    const auto target = node ? backupTarget(*node) : std::filesystem::path{};
     // Only while editing is possible, and only for things that can actually be backed up.
-    const bool warn = m_editMode && !target.empty() && !hasBackup(*node);
-    m_preview->setBackupWarning(warn ? toQString(target.filename()) : QString());
+    const auto warningFor = [this](const VfsNode* node) {
+        const auto target = node && m_session ? backupTarget(*node) : std::filesystem::path{};
+        return m_editMode && !target.empty() && !hasBackup(*node) ? toQString(target.filename()) : QString();
+    };
+    m_folderView->banner()->setWarning(warningFor(m_folderView->folder()));
+    m_preview->setBackupWarning(warningFor(m_preview->node()));
 }
 
 void MainWindow::backupCurrent()
@@ -662,6 +762,7 @@ void MainWindow::backupCurrent()
     if (target.empty() || hasBackup(*node))
         return;
     m_preview->setBackupInProgress(true);
+    m_folderView->banner()->setInProgress(true);
     m_statusLabel->setText(tr("Backing up %1…").arg(toQString(target.filename())));
     m_progress->setRange(0, 0);
     m_progress->show();
@@ -738,6 +839,7 @@ void MainWindow::replaceNode(const VfsNode* node, const QString& file)
         return;
 
     m_pendingSelect = toQString(node->virtualPath());
+    m_pendingOpen = previewShowing(); // come back to the same view after the reload
     m_statusLabel->setText(tr("Replacing %1…").arg(toQString(node->name())));
     m_progress->setRange(0, 0);
     m_progress->show();
@@ -765,8 +867,10 @@ void MainWindow::restoreOriginal()
     // remember what to reopen once the restore finishes.
     m_reopen = {m_session->game, m_session->source};
     const QString reselect = toQString(node->virtualPath());
+    const bool reopenPreview = previewShowing();
     setSession(nullptr);
     m_pendingSelect = reselect;
+    m_pendingOpen = reopenPreview;
 
     m_statusLabel->setText(tr("Restoring %1…").arg(name));
     m_progress->setRange(0, 0);
@@ -784,6 +888,7 @@ void MainWindow::onEditFinished()
 
     if (result.kind == EditResult::Kind::Backup) { // nothing changed in the archive: no reload
         m_preview->setBackupInProgress(false);
+        m_folderView->banner()->setInProgress(false);
         if (!result.error.isEmpty())
             QMessageBox::warning(this, tr("Back Up"), result.error);
         else
@@ -821,7 +926,7 @@ const VfsNode* MainWindow::dropTarget(const QPoint& pos, const QMimeData* mime, 
     const QString file = mime->urls().front().toLocalFile();
     if (!QFileInfo(file).isFile())
         return nullptr;
-    const VfsNode* node = VfsModel::nodeFromIndex(m_filter->mapToSource(m_tree->indexAt(pos)));
+    const VfsNode* node = m_folderView->nodeAt(pos);
     if (!node || !node->isFile())
         return nullptr;
     if (!m_editMode) {
@@ -843,10 +948,11 @@ const VfsNode* MainWindow::dropTarget(const QPoint& pos, const QMimeData* mime, 
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
-    if (watched != m_tree->viewport())
+    QTreeView* list = m_folderView->view();
+    if (watched != list->viewport())
         return QMainWindow::eventFilter(watched, event);
 
-    // Over the tree, a single dropped file either replaces the item under the
+    // Over the folder list, a single dropped file either replaces the item under the
     // cursor (matching type), is refused with a reason (other type), or —
     // over empty space / folders — opens like a drop anywhere else.
     const auto isFileDrag = [](const QMimeData* mime) {
@@ -864,8 +970,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
         if (const VfsNode* node = dropTarget(pos, drag->mimeData(), &reason)) {
             drag->acceptProposedAction();
             // Highlight the row that would be replaced (selection only, no preview reload).
-            m_tree->selectionModel()->select(m_tree->indexAt(pos),
-                                             QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+            list->selectionModel()->select(list->indexAt(pos),
+                                           QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
             statusBar()->showMessage(tr("Drop to replace %1").arg(toQString(node->name())));
         } else if (!reason.isEmpty()) {
             drag->setDropAction(Qt::IgnoreAction); // "not allowed" cursor
@@ -907,11 +1013,18 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 
 std::vector<const VfsNode*> MainWindow::selectedNodes() const
 {
-    std::vector<const VfsNode*> nodes;
-    for (const QModelIndex& index : m_tree->selectionModel()->selectedRows(VfsModel::Name))
-        if (const VfsNode* node = VfsModel::nodeFromIndex(m_filter->mapToSource(index)))
-            nodes.push_back(node);
-    return nodes;
+    if (!m_session)
+        return {};
+    // The previewed file; else what's selected in the list (unless the tree
+    // has focus); else the folder selected in the tree.
+    if (previewShowing())
+        return m_preview->node() ? std::vector{m_preview->node()} : std::vector<const VfsNode*>{};
+    if (!m_tree->hasFocus())
+        if (auto nodes = m_folderView->selectedNodes(); !nodes.empty())
+            return nodes;
+    if (const VfsNode* folder = treeNode())
+        return {folder};
+    return {};
 }
 
 void MainWindow::updateActions()
@@ -933,13 +1046,44 @@ void MainWindow::updateActions()
     m_restoreAction->setEnabled(m_editMode && !busy && single && hasBackup(*single));
     m_copyPathAction->setEnabled(!nodes.empty());
     m_revealAction->setEnabled(single && !single->diskPath().empty());
+    m_openAction->setEnabled(single != nullptr);
+    m_propertiesAction->setEnabled(single != nullptr);
+    const VfsNode* folder = m_folderView->folder();
+    m_backAction->setEnabled(previewShowing() || (folder && folder->parent()));
 }
 
 void MainWindow::showTreeContextMenu(const QPoint& pos)
 {
     if (!m_tree->indexAt(pos).isValid())
         return;
+    m_tree->setFocus(); // the menu acts on the tree's folder, not the list selection
+    updateActions();
     QMenu menu(this);
+    menu.addAction(m_extractAction);
+    if (m_restoreAction->isEnabled())
+        menu.addAction(m_restoreAction);
+    menu.addSeparator();
+    menu.addAction(m_copyPathAction);
+    menu.addAction(m_revealAction);
+    menu.addSeparator();
+    menu.addAction(m_propertiesAction);
+    menu.exec(m_tree->viewport()->mapToGlobal(pos));
+}
+
+void MainWindow::showListContextMenu(const QPoint& globalPos)
+{
+    QTreeView* list = m_folderView->view();
+    if (!list->indexAt(list->viewport()->mapFromGlobal(globalPos)).isValid())
+        m_folderView->clearSelection(); // empty space: act on the open folder
+    updateActions();
+    QMenu menu(this);
+    const auto nodes = m_folderView->selectedNodes();
+    if (nodes.size() == 1) {
+        m_openAction->setText(nodes.front()->isFile() ? tr("&Preview") : tr("&Open"));
+        menu.addAction(m_openAction);
+        menu.setDefaultAction(m_openAction);
+        menu.addSeparator();
+    }
     menu.addAction(m_extractAction);
     menu.addAction(m_replaceAction);
     if (m_restoreAction->isEnabled())
@@ -947,7 +1091,9 @@ void MainWindow::showTreeContextMenu(const QPoint& pos)
     menu.addSeparator();
     menu.addAction(m_copyPathAction);
     menu.addAction(m_revealAction);
-    menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    menu.addSeparator();
+    menu.addAction(m_propertiesAction);
+    menu.exec(globalPos);
 }
 
 // ---- Extraction ------------------------------------------------------------------------------
@@ -1016,14 +1162,18 @@ void MainWindow::closeEvent(QCloseEvent* event)
         m_extractWatcher->waitForFinished();
     }
     QSettings settings;
-    // Reopened at next start-up (see reopenLastSession).
-    const VfsNode* current = VfsModel::nodeFromIndex(m_filter->mapToSource(m_tree->currentIndex()));
-    settings.setValue("session/selection", current ? toQString(current->virtualPath()) : QString());
+    // Reopened at next start-up (see reopenLastSession): the previewed file,
+    // or the open folder.
+    if (m_rememberSession) {
+        const VfsNode* current = currentNode();
+        settings.setValue("session/selection", current ? toQString(current->virtualPath()) : QString());
+        settings.setValue("session/previewOpen", previewShowing());
+    }
     settings.setValue("window/geometry", saveGeometry());
     settings.setValue("window/state", saveState());
-    settings.setValue("window/treeHeader", m_tree->header()->saveState());
+    settings.setValue("window/listHeader", m_folderView->saveHeaderState());
     if (auto* splitter = findChild<QSplitter*>("mainSplitter"))
-        settings.setValue("window/splitter", splitter->saveState());
+        settings.setValue("window/browserSplitter", splitter->saveState());
     QMainWindow::closeEvent(event);
 }
 

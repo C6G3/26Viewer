@@ -53,22 +53,47 @@ At the next multiple of `alignment` after the name table:
 |---|---|
 | u32 | entry count (files **and** directory records) |
 | u32 | table size in bytes → `stride = tableBytes / count` (32 / 40 / 64) |
-| u32 | unknown (total size?) 🟡 |
 
-Entry (`stride` bytes):
+then `count` entries of `stride` bytes, **sorted by name hash** (the game
+binary-searches them):
 
 | Offset | Type | Meaning |
 |---|---|---|
-| 0 | u32 | name offset into the name table |
-| 4 | u32 | parent directory's name offset (`0xFFFFFFFF` for root) |
-| 8 | u32 | uncompressed size |
-| 12 | u64 | FILETIME |
-| 20 | i64 | data offset in alignment units; **−1 = directory record** |
-| 28 | u32 | v2: content hash = `~crc32(uncompressed data)` for files ≤ 32 KiB ✅; larger files use an unknown variant (not prefix/suffix/sampled/block-combined CRC) 🟡 |
-| 32 | u32 | v2: stored size |
-| 36 | u32 | stride 64 only: flags/zero 🟡 |
-| 40 | u8[20] | stride 64 only: **SHA-1 of the stored (compressed) bytes** ✅ |
-| stride−4 | u32 | name hash — not CRC-32/FNV/djb2/sdbm/one-at-a-time of any path spelling tried; table not sorted by it ❓ |
+| 0 | u32 | **name hash** (see below) ✅ |
+| 4 | u32 | name offset into the name table |
+| 8 | u32 | parent directory's name offset (`0xFFFFFFFF` for root) |
+| 12 | u32 | uncompressed size |
+| 16 | u64 | FILETIME |
+| 24 | i64 | data offset in alignment units; **−1 = directory record** |
+| 32 | u32 | v2: **content hash** (see below) ✅ |
+| 36 | u32 | v2: stored size |
+| 40 | u32 | stride 64 only: flags/zero 🟡 |
+| 44 | u8[20] | stride 64 only: **SHA-1 of the stored (compressed) bytes** ✅ |
+
+(Earlier versions of this document started each entry 4 bytes too late, which
+made the name hash look like the *last* field of the previous entry.)
+
+### Hashes ✅
+
+Both were recovered from `Blur.exe` (PC, 32-bit) and verified against every
+entry of every shipped archive (6,775 name hashes; 4,815 content hashes, 2,297
+of them for files over 32 KiB). "`~crc32`" below means standard CRC-32 (zlib,
+polynomial `0xEDB88320`) **without** the final inversion, i.e.
+`zlib.crc32(x) ^ 0xFFFFFFFF`.
+
+- **Name hash** = `~crc32(path)` over the in-archive path as stored in the name
+  table: lower case, backslashes, leading `\` (e.g. `\models\cars\a.model`;
+  directories too, e.g. `\ui`). Code: name lookup at `0x00CB6720` — normalises
+  the path with `0x00403970` (A–Z → a–z, `/` → `\`), hashes it with the table
+  built by `0x00CB6460`, then binary-searches the entries (`0x00CB6620`).
+- **Content hash** = sum (mod 2³²) of `~crc32(block)` over the uncompressed
+  data split into **32 KiB blocks**. A file of ≤ 32 KiB is a single block, so
+  its hash is plain `~crc32(data)`. Code: the archive self-check at
+  `0x00CB7340` (reads each file in `0x8000`-byte pieces, adds the per-piece
+  CRCs, compares the sum with entry+0x20).
+
+Python: `name_hash()` / `content_hash()` in `tools/research/blur_pak.py`
+(`verify` checks both). C++: `PakArchive::nameHash()` / `contentHash()`.
 
 `gamedata.pak` / `gamedata_boot.pak` (the stride-64 archives) ship with
 128-byte `.sig` files, most likely RSA-1024 signatures over the table.
@@ -81,12 +106,14 @@ Entry (`stride` bytes):
    64 KiB chunked raw deflate — every chunk deflated / v1 size-prefixed zlib).
 2. Append it at the next `alignment` boundary at the end of the file (the old
    data stays, unused).
-3. Patch only that entry: size, FILETIME, offset, stored size, content hash
-   (`~crc32`), and for stride-64 archives the SHA-1 digest.
+3. Patch only that entry: size, FILETIME, offset, stored size, content hash,
+   and for stride-64 archives the SHA-1 digest. The name — and therefore the
+   name hash and the table order — stays the same.
 
 The record is patched last, so an interrupted write leaves the archive
-pointing at the old data. Whether the game accepts files over 32 KiB (unknown
-hash variant) or modified signed archives has **not been tested in-game yet**.
+pointing at the old data. Both hashes are written exactly as the game
+computes them; whether the game accepts modified **signed** archives
+(`gamedata*.pak`) has **not been tested in-game yet**.
 
 ### Data encodings
 

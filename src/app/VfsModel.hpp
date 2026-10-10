@@ -4,12 +4,14 @@
 #include "viewer/core/Vfs.hpp"
 
 #include <QAbstractItemModel>
+#include <QIcon>
 #include <QSortFilterProxyModel>
 
 namespace viewer::app {
 
 /// Exposes a Vfs tree to Qt views. Each QModelIndex stores a VfsNode* in its
 /// internal pointer; the tree is immutable while the model is attached.
+/// The root itself is the single top-level row (shown as the game's name).
 class VfsModel : public QAbstractItemModel {
     Q_OBJECT
 public:
@@ -19,7 +21,9 @@ public:
     explicit VfsModel(QObject* parent = nullptr);
 
     /// Attaches a tree (or detaches with nullptrs). Both must outlive the model's use.
-    void setSource(const VfsNode* root, const ContentRegistry* content);
+    /// `rootLabel` / `rootIcon` are shown for the root row.
+    void setSource(const VfsNode* root, const ContentRegistry* content, const QString& rootLabel = {},
+                   const QIcon& rootIcon = {});
 
     [[nodiscard]] static const VfsNode* nodeFromIndex(const QModelIndex& index);
     [[nodiscard]] QModelIndex indexForNode(const VfsNode* node, int column = Name) const;
@@ -37,17 +41,25 @@ public:
 private:
     const VfsNode* m_root = nullptr;
     const ContentRegistry* m_content = nullptr;
+    QString m_rootLabel;
+    QIcon m_rootIcon;
 };
 
-/// Sorting (folders first) and recursive name filtering for the tree.
+/// Sorting (folders first) and recursive name filtering.
 class VfsFilterModel : public QSortFilterProxyModel {
     Q_OBJECT
 public:
     explicit VfsFilterModel(QObject* parent = nullptr);
 
+    /// Hides files, leaving folders and archives (the navigation tree).
+    void setContainersOnly(bool on);
+
 protected:
     bool lessThan(const QModelIndex& left, const QModelIndex& right) const override;
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override;
+
+private:
+    bool m_containersOnly = false;
 };
 
 } // namespace viewer::app

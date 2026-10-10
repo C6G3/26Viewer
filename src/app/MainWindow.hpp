@@ -22,6 +22,7 @@ class QTreeView;
 
 namespace viewer::app {
 
+class FolderView;
 class PreviewPane;
 class ThemeManager;
 class VfsFilterModel;
@@ -43,9 +44,13 @@ public:
     bool chooseGame();
     /// Opens a path given on the command line (game folder or archive).
     void openPath(const QString& path);
-    /// Selects and reveals a node by virtual path ("cache/root.pak/models/a.model").
-    bool selectPath(const QString& virtualPath);
+    /// Reveals a node by virtual path ("cache/root.pak/models/a.model"): a
+    /// folder/archive is opened in the list; a file is selected in its folder
+    /// and, with `openFile`, previewed.
+    bool selectPath(const QString& virtualPath, bool openFile = true);
     [[nodiscard]] PreviewPane* previewPane() const noexcept { return m_preview; }
+    /// True while a file's preview (rather than the folder list) is shown.
+    [[nodiscard]] bool previewShowing() const;
     /// Re-opens the game/archive from the previous run (saved in the settings
     /// file in %APPDATA%). Returns false if there is nothing to reopen or the
     /// user turned the option off.
@@ -80,8 +85,19 @@ private:
     void onLoadFinished();
     void setSession(std::shared_ptr<Session> session);
     QWidget* buildPlaceholder();
-    void configureTreeHeader();
-    void showHeaderMenu(const QPoint& pos);
+
+    // Browsing: tree (folders/archives) → folder list → preview
+    /// Shows `folder` in the list (selecting it in the tree). With `reveal`,
+    /// selects the item in `folder` that leads to it (used when going up).
+    void navigateTo(const VfsNode* folder, const VfsNode* reveal = nullptr);
+    /// Double-click / Enter in the list: enter folders, preview files.
+    void activateNode(const VfsNode* node);
+    void openPreview(const VfsNode* node, bool properties = false);
+    /// Returns from the preview to the folder list.
+    void showList();
+    /// Backspace: preview → list, list → parent folder.
+    void goBack();
+    [[nodiscard]] const VfsNode* treeNode() const;
 
     void extract(bool everything);
     void onExtractFinished();
@@ -91,7 +107,8 @@ private:
     void replaceNode(const VfsNode* node, const QString& file);
     void restoreOriginal();
     void onEditFinished();
-    /// Re-mounts the current game/archive and then selects `virtualPath`.
+    /// Re-mounts the current game/archive and then selects `virtualPath`
+    /// (see m_pendingOpen).
     void reloadSession(const QString& virtualPath);
     /// The file node a drag at `pos` would replace; `reason` explains a refusal.
     const VfsNode* dropTarget(const QPoint& pos, const QMimeData* mime, QString* reason) const;
@@ -100,9 +117,11 @@ private:
     void updateBackupBanner();
     /// Backs up the current item's archive (or loose file) in the background.
     void backupCurrent();
+    /// What the backup banner refers to: the previewed file, else the open folder.
     [[nodiscard]] const VfsNode* currentNode() const;
 
     void showTreeContextMenu(const QPoint& pos);
+    void showListContextMenu(const QPoint& globalPos);
     [[nodiscard]] std::vector<const VfsNode*> selectedNodes() const;
     void updateActions();
     void showAbout();
@@ -115,6 +134,7 @@ private:
     QFutureWatcher<EditResult>* m_editWatcher;
     QString m_extractTarget;
     QString m_pendingSelect; ///< Selected once the next session finishes loading.
+    bool m_pendingOpen = true; ///< ...and previewed, if it is a file.
     struct Reopen {
         const Game* game = nullptr; ///< Null for a standalone archive.
         std::filesystem::path source;
@@ -122,10 +142,12 @@ private:
     std::optional<Reopen> m_reopen; ///< What to reopen after a restore closed the session.
 
     VfsModel* m_model;
-    VfsFilterModel* m_filter;
+    VfsFilterModel* m_treeFilter; ///< Folders and archives only.
     QStackedWidget* m_leftStack;
     QTreeView* m_tree;
     QWidget* m_placeholder;
+    QStackedWidget* m_rightStack; ///< Folder list or preview.
+    FolderView* m_folderView;
     PreviewPane* m_preview;
     QLineEdit* m_search;
     QLabel* m_statusLabel;
@@ -142,6 +164,9 @@ private:
     QAction* m_restoreAction = nullptr;
     QAction* m_reopenAction = nullptr;
     QAction* m_editModeAction = nullptr;
+    QAction* m_backAction = nullptr;
+    QAction* m_openAction = nullptr;
+    QAction* m_propertiesAction = nullptr;
     QLabel* m_editModeBadge = nullptr;
     bool m_editMode = false;
     bool m_rememberSession = true;

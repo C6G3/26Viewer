@@ -8,13 +8,17 @@
 //   0x10  u16      flags (v2)         0x24 in v1
 //   0x38  u32      name table size; when 0 the size lives at `alignment`
 //   ....  name table, XOR-obfuscated with a 14-byte key, NUL-separated strings
-//   align file table: u32 count, u32 tableBytes, u32 unknown, then `count`
-//         fixed-size entries (stride = tableBytes / count: 32, 40 or 64 bytes)
+//   align file table: u32 count, u32 tableBytes, then `count` fixed-size
+//         entries (stride = tableBytes / count: 32, 40 or 64 bytes), sorted
+//         by name hash
 //
-// Entry: u32 nameOffset, u32 parentNameOffset, u32 size, u64 FILETIME,
-//        i64 offset (alignment units, -1 = directory),
-//        [v2] u32 hash, u32 storedSize, [stride 64] u32 flags + 20-byte digest,
-//        u32 nameHash (last 4 bytes)
+// Entry: u32 nameHash, u32 nameOffset, u32 parentNameOffset, u32 size,
+//        u64 FILETIME, i64 offset (alignment units, -1 = directory),
+//        [v2] u32 contentHash, u32 storedSize, [stride 64] u32 flags + 20-byte
+//        SHA-1 of the stored bytes
+//
+// Both hashes were recovered from Blur.exe (name lookup at 0xCB6720, archive
+// self-check at 0xCB7340) and verified against every shipped entry.
 //
 // Data storage, one of:
 //   * stored            storedSize == size
@@ -129,7 +133,7 @@ Result<std::unique_ptr<PakArchive>> PakArchive::open(const std::filesystem::path
     // --- File table ---------------------------------------------------------------
     const std::uint64_t align = pak->m_alignment;
     const std::uint64_t tableOffset = (namesOffset + namesSize + align - 1) / align * align;
-    auto tableHeader = file.read(tableOffset, 12);
+    auto tableHeader = file.read(tableOffset, 8);
     if (!tableHeader)
         return std::unexpected(tableHeader.error());
     const auto count = loadScalar<std::uint32_t>(*tableHeader, 0);
@@ -144,7 +148,8 @@ Result<std::unique_ptr<PakArchive>> PakArchive::open(const std::filesystem::path
                     tableBytes, count);
     pak->m_entryStride = stride;
 
-    auto table = file.read(tableOffset + 12, tableBytes);
+    const std::uint64_t entriesOffset = tableOffset + 8;
+    auto table = file.read(entriesOffset, tableBytes);
     if (!table)
         return std::unexpected(table.error());
 
@@ -152,10 +157,10 @@ Result<std::unique_ptr<PakArchive>> PakArchive::open(const std::filesystem::path
     pak->m_slots.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         const ByteSpan e = ByteSpan(*table).subspan(static_cast<std::size_t>(i) * stride, stride);
-        const auto nameOffset = loadScalar<std::uint32_t>(e, 0);
-        const auto size = loadScalar<std::uint32_t>(e, 8);
-        const auto fileTime = loadScalar<std::uint64_t>(e, 12);
-        const auto offset = loadScalar<std::int64_t>(e, 20);
+        const auto nameOffset = loadScalar<std::uint32_t>(e, 4);
+        const auto size = loadScalar<std::uint32_t>(e, 12);
+        const auto fileTime = loadScalar<std::uint64_t>(e, 16);
+        const auto offset = loadScalar<std::int64_t>(e, 24);
 
         if (offset == -1) { // directory record — the VFS derives folders from paths
             ++pak->m_directoryCount;
@@ -165,16 +170,16 @@ Result<std::unique_ptr<PakArchive>> PakArchive::open(const std::filesystem::path
             return fail(ErrorCode::InvalidFormat, "{}: entry {} points outside the file", name, i);
 
         Slot slot;
-        slot.entryOffset = tableOffset + 12 + std::uint64_t{i} * stride;
+        slot.entryOffset = entriesOffset + std::uint64_t{i} * stride;
         slot.dataOffset = static_cast<std::uint64_t>(offset) * align;
-        slot.nameHash = loadScalar<std::uint32_t>(e, stride - 4);
+        slot.nameHash = loadScalar<std::uint32_t>(e, 0);
         std::uint64_t packed = 0;
         if (pak->m_version >= 2) {
-            slot.hash = loadScalar<std::uint32_t>(e, 28);
-            slot.storedSize = loadScalar<std::uint32_t>(e, 32);
+            slot.hash = loadScalar<std::uint32_t>(e, 32);
+            slot.storedSize = loadScalar<std::uint32_t>(e, 36);
             packed = slot.storedSize;
             if (stride == 64) {
-                std::copy_n(e.data() + 40, slot.digest.size(), slot.digest.begin());
+                std::copy_n(e.data() + 44, slot.digest.size(), slot.digest.begin());
                 slot.hasDigest = true;
             }
         } else {
@@ -298,11 +303,28 @@ bool writeAt(std::fstream& f, std::uint64_t offset, T value)
     return static_cast<bool>(f);
 }
 
-/// Blur's per-entry hash: bitwise NOT of CRC-32 over the uncompressed data.
-/// Verified for every file up to 32 KiB; larger files use an unknown variant.
-constexpr std::uint64_t kHashVerifiedLimit = 32 * 1024;
-
 } // namespace
+
+std::uint32_t PakArchive::nameHash(std::string_view archivePath) noexcept
+{
+    std::string lower(archivePath);
+    for (char& c : lower) {
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
+        else if (c == '/')
+            c = '\\';
+    }
+    return compression::crc32(asBytes(lower)) ^ 0xFFFFFFFFu;
+}
+
+std::uint32_t PakArchive::contentHash(ByteSpan data) noexcept
+{
+    constexpr std::size_t kBlock = 32 * 1024;
+    std::uint32_t sum = 0;
+    for (std::size_t pos = 0; pos < data.size(); pos += kBlock)
+        sum += compression::crc32(data.subspan(pos, std::min(kBlock, data.size() - pos))) ^ 0xFFFFFFFFu;
+    return sum;
+}
 
 Result<ByteBuffer> PakArchive::encodeLike(const Slot& slot, std::uint64_t originalSize, ByteSpan data,
                                           std::string& storageName) const
@@ -390,16 +412,17 @@ Result<ReplaceReport> PakArchive::replace(std::size_t index, ByteSpan data) cons
 
     // 2. Re-point this entry's record at the new data. Done last, so an
     //    interrupted write leaves the archive pointing at the old data.
+    //    The name (and so the name hash and sort order) is unchanged.
     const std::uint64_t e = slot.entryOffset;
-    bool ok = writeAt(f, e + 8, static_cast<std::uint32_t>(data.size()))
-              && writeAt(f, e + 12, toFileTime(std::chrono::system_clock::now()))
-              && writeAt(f, e + 20, static_cast<std::int64_t>(dataPos / align));
+    bool ok = writeAt(f, e + 12, static_cast<std::uint32_t>(data.size()))
+              && writeAt(f, e + 16, toFileTime(std::chrono::system_clock::now()))
+              && writeAt(f, e + 24, static_cast<std::int64_t>(dataPos / align));
     if (m_version >= 2) {
-        ok = ok && writeAt(f, e + 28, compression::crc32(data) ^ 0xFFFFFFFFu)
-             && writeAt(f, e + 32, static_cast<std::uint32_t>(blob->size()));
+        ok = ok && writeAt(f, e + 32, contentHash(data))
+             && writeAt(f, e + 36, static_cast<std::uint32_t>(blob->size()));
         if (m_entryStride == 64) {
             const auto digest = hash::sha1(*blob); // SHA-1 of the stored bytes
-            f.seekp(static_cast<std::streamoff>(e + 40));
+            f.seekp(static_cast<std::streamoff>(e + 44));
             f.write(reinterpret_cast<const char*>(digest.data()), static_cast<std::streamsize>(digest.size()));
             ok = ok && static_cast<bool>(f);
         }
@@ -409,10 +432,6 @@ Result<ReplaceReport> PakArchive::replace(std::size_t index, ByteSpan data) cons
         return fail(ErrorCode::Io, "could not update the file table of '{}'", u8name(path));
 
     report.storedSize = blob->size();
-    if (m_version >= 2 && data.size() > kHashVerifiedLimit)
-        report.warnings.push_back(
-            "Blur's checksum for files over 32 KiB isn't fully understood; a CRC-32 was written instead. "
-            "If the game rejects the file, this is the likely reason.");
     auto sig = path;
     sig.replace_extension(".sig");
     std::error_code ec;

@@ -37,10 +37,12 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 3. [x] Windows resources: `.ico` app icon (rendered from SVG at build time by `tools/icongen`) + VERSIONINFO
 4. [x] Reopen the last game + selection at start-up (settings in `%APPDATA%\26Viewer\26Viewer.ini`)
    - [ ] Recent games / recent archives menu (File ▸ Recent)
+4a. [x] OpenIV-style browsing: folder/archive tree → contents list → double-click to preview,
+   Backspace back, clickable path bar, search within the open folder, Properties (`Alt+Enter`)
 4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
    - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
    - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups
-   - [ ] Test replaced Blur files in-game (≤ 32 KiB files, > 32 KiB files, signed gamedata archives)
+   - [ ] Test replaced Blur files in-game (normal archives, signed gamedata archives)
    - [ ] Batch replace: drop a folder whose layout mirrors the archive
 5. [ ] Status-bar breadcrumb and "Go to path…" (`Ctrl+L`) using `MainWindow::selectPath`
 6. [ ] Hex view: selection, copy as hex/C array, go-to-offset, find bytes
@@ -58,9 +60,9 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 4. [ ] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia)
 5. [ ] Data tables (`.bin`, `.loc`, `.xt`) → table view
 6. [ ] `.bpr` (`2RZB`) UI packs, `.ipf` layouts, `.pf` fonts
-7. [ ] PAK hashes: digest = SHA-1(stored) ✅, content hash ≤ 32 KiB = ~CRC-32 ✅; still unknown: content hash for
-   larger files, name hash (needed to **add new files** to an archive)
-8. [ ] Add new files to archives (full repack: grow name table + file table) once the name hash is known
+7. [x] PAK hashes (recovered from Blur.exe, see docs/formats/blur.md): digest = SHA-1(stored),
+   content hash = Σ ~CRC-32 per 32 KiB block, name hash = ~CRC-32 of the lower-case `\path`
+8. [ ] Add new files to archives (full repack: grow name table + file table, keep entries sorted by name hash)
 
 ## Phase 5 — Multi-game platform
 

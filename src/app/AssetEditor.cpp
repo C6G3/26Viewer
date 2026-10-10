@@ -66,6 +66,10 @@ std::filesystem::path backupTarget(const VfsNode& node)
         return node.diskPath();
     if (node.isFile())
         return Vfs::editTarget(node);
+    // A folder inside an archive is protected by that archive's backup.
+    for (const VfsNode* n = node.parent(); n; n = n->parent())
+        if (n->kind() == VfsNode::Kind::Archive)
+            return n->diskPath();
     return {};
 }
 

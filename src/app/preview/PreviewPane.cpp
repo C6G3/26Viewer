@@ -1,5 +1,7 @@
 #include "PreviewPane.hpp"
 
+#include "../BackupBanner.hpp"
+#include "../Icons.hpp"
 #include "../QtConvert.hpp"
 #include "HexView.hpp"
 #include "ImageView.hpp"
@@ -7,10 +9,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFontDatabase>
-#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
-#include <QPushButton>
 #include <QLabel>
 #include <QLocale>
 #include <QPlainTextEdit>
@@ -18,6 +18,7 @@
 #include <QStringDecoder>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
@@ -151,9 +152,8 @@ void addStructureItems(QTreeWidgetItem* parent, QTreeWidget* tree, const Structu
 
 PreviewPane::PreviewPane(QWidget* parent)
     : QWidget(parent), m_watcher(new QFutureWatcher<std::shared_ptr<PreviewResult>>(this)),
-      m_title(new QLabel(this)), m_subtitle(new QLabel(this)), m_banner(new QFrame(this)),
-      m_bannerText(new QLabel(m_banner)), m_bannerButton(new QPushButton(tr("Back Up Now"), m_banner)),
-      m_tabs(new QTabWidget(this)),
+      m_back(new QToolButton(this)), m_title(new QLabel(this)), m_subtitle(new QLabel(this)),
+      m_banner(new BackupBanner(this)), m_tabs(new QTabWidget(this)),
       m_previewStack(new QStackedWidget(this)), m_message(new QLabel(this)), m_image(new ImageView(this)),
       m_text(new QPlainTextEdit(this)), m_structure(new QTreeWidget(this)), m_hex(new HexView(this)),
       m_properties(new QTreeWidget(this))
@@ -207,31 +207,27 @@ PreviewPane::PreviewPane(QWidget* parent)
             m_preferredTab = index;
     });
 
-    // "Not backed up" banner (Edit Mode). A fixed red reads as a warning in
-    // both light and dark themes, so it deliberately ignores the palette.
-    m_banner->setObjectName(QStringLiteral("backupBanner"));
-    m_banner->setStyleSheet(QStringLiteral(
-        "QFrame#backupBanner { background: #C42B1C; border-radius: 6px; }"
-        "QFrame#backupBanner QLabel { color: white; }"
-        "QFrame#backupBanner QPushButton { background: white; color: #C42B1C; border: none;"
-        "  border-radius: 4px; padding: 5px 14px; font-weight: 600; }"
-        "QFrame#backupBanner QPushButton:hover { background: #FDE7E9; }"
-        "QFrame#backupBanner QPushButton:disabled { background: #F1B9B3; color: #7A1A10; }"));
-    m_bannerText->setWordWrap(true);
-    m_bannerText->setTextFormat(Qt::RichText);
-    m_bannerButton->setCursor(Qt::PointingHandCursor);
-    auto* bannerLayout = new QHBoxLayout(m_banner);
-    bannerLayout->setContentsMargins(12, 8, 8, 8);
-    bannerLayout->addWidget(m_bannerText, 1);
-    bannerLayout->addWidget(m_bannerButton);
-    m_banner->hide();
-    connect(m_bannerButton, &QPushButton::clicked, this, &PreviewPane::backupRequested);
+    connect(m_banner, &BackupBanner::backupRequested, this, &PreviewPane::backupRequested);
+
+    m_back->setIcon(icons::theme(QIcon::ThemeIcon::GoPrevious, QStyle::SP_ArrowBack));
+    m_back->setAutoRaise(true);
+    m_back->setIconSize(QSize(20, 20));
+    m_back->hide();
+    connect(m_back, &QToolButton::clicked, this, &PreviewPane::backRequested);
+
+    auto* titles = new QVBoxLayout;
+    titles->setSpacing(2);
+    titles->addWidget(m_title);
+    titles->addWidget(m_subtitle);
+    auto* titleRow = new QHBoxLayout;
+    titleRow->setSpacing(6);
+    titleRow->addWidget(m_back, 0, Qt::AlignTop);
+    titleRow->addLayout(titles, 1);
 
     auto* header = new QVBoxLayout;
-    header->setContentsMargins(12, 10, 12, 6);
+    header->setContentsMargins(8, 10, 12, 6);
     header->setSpacing(2);
-    header->addWidget(m_title);
-    header->addWidget(m_subtitle);
+    header->addLayout(titleRow);
     header->addSpacing(6);
     header->addWidget(m_banner);
 
@@ -274,7 +270,13 @@ void PreviewPane::showMessage(const QString& message)
 
 void PreviewPane::showNode(const VfsNode* node)
 {
+    display(node, -1);
+}
+
+void PreviewPane::display(const VfsNode* node, int forcedTab)
+{
     m_node = node;
+    m_forcedTab = forcedTab;
     ++m_generation;
     m_image->clear();
     m_text->clear();
@@ -284,7 +286,7 @@ void PreviewPane::showNode(const VfsNode* node)
     if (!node || !m_session) {
         m_title->setText(m_session ? m_session->title() : tr("Nothing selected"));
         m_subtitle->setText(m_session ? tr("Select a file to preview it") : tr("Open a game to get started"));
-        showMessage(tr("Select a file in the tree to see its contents here."));
+        showMessage(tr("Double-click a file in the list to preview it."));
         fillProperties(nullptr, nullptr);
         return;
     }
@@ -300,6 +302,8 @@ void PreviewPane::showNode(const VfsNode* node)
         showMessage(tr("%n file(s), %1 unpacked", nullptr, static_cast<int>(node->fileCount()))
                         .arg(QLocale().formattedDataSize(static_cast<qint64>(node->size()))));
         fillProperties(node, nullptr);
+        if (m_forcedTab >= 0)
+            m_tabs->setCurrentIndex(m_forcedTab);
         emit previewReady();
         return;
     }
@@ -337,7 +341,7 @@ void PreviewPane::applyResult(const PreviewResult& result)
     }
 
     // Respect the tab the user last chose, unless it has nothing to show.
-    int tab = m_preferredTab;
+    int tab = m_forcedTab >= 0 ? m_forcedTab : m_preferredTab;
     if (tab == StructureTab && !result.structure)
         tab = PreviewTab;
     if (tab == PreviewTab && !hasPreview)
@@ -350,20 +354,23 @@ void PreviewPane::applyResult(const PreviewResult& result)
 
 void PreviewPane::setBackupWarning(const QString& fileName)
 {
-    if (fileName.isEmpty()) {
-        m_banner->hide();
-        return;
-    }
-    m_bannerText->setText(tr("<b>⚠ %1 is not backed up.</b><br>Changes made in Edit Mode can't be undone "
-                             "without a backup.")
-                              .arg(fileName.toHtmlEscaped()));
-    m_banner->show();
+    m_banner->setWarning(fileName);
 }
 
 void PreviewPane::setBackupInProgress(bool running)
 {
-    m_bannerButton->setEnabled(!running);
-    m_bannerButton->setText(running ? tr("Backing up…") : tr("Back Up Now"));
+    m_banner->setInProgress(running);
+}
+
+void PreviewPane::setBackTarget(const QString& folderName)
+{
+    m_back->setVisible(!folderName.isEmpty());
+    m_back->setToolTip(tr("Back to %1  (Backspace)").arg(folderName));
+}
+
+void PreviewPane::showProperties(const VfsNode* node)
+{
+    display(node, PropertiesTab);
 }
 
 void PreviewPane::setCurrentTab(int tab)

@@ -35,7 +35,7 @@ struct ReplacePlan {
 Result<ReplacePlan> planReplace(const Session& session, const VfsNode& node, const QString& file);
 
 /// The file on disk whose backup protects `node`: its archive, the archive
-/// itself for archive nodes, or the loose file. Empty for folders.
+/// itself for archive nodes, or the loose file. Empty for folders on disk.
 [[nodiscard]] std::filesystem::path backupTarget(const VfsNode& node);
 
 /// True if `node`'s backup target has a .bak original.

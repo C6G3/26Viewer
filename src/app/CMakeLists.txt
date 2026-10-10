@@ -8,8 +8,12 @@ qt_add_executable(viewer_app WIN32
     main.cpp
     AssetEditor.cpp
     AssetEditor.hpp
+    BackupBanner.cpp
+    BackupBanner.hpp
     Extractor.cpp
     Extractor.hpp
+    FolderView.cpp
+    FolderView.hpp
     GamePickerDialog.cpp
     GamePickerDialog.hpp
     Icons.cpp

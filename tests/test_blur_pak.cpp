@@ -6,11 +6,13 @@
 #include "TestUtil.hpp"
 
 #include "PakArchive.hpp"
+#include "viewer/core/Compression.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
 #include <cstdlib>
+#include <format>
 
 using namespace viewer;
 using viewer::games::blur::PakArchive;
@@ -99,7 +101,7 @@ ByteBuffer buildPak(const std::vector<FileSpec>& files, int version, std::uint32
         blobs.push_back(encode(f, version));
 
     // Data offsets (in alignment units) after the table.
-    std::uint64_t cursor = (tableOffset + 12 + std::uint64_t{count} * stride + kAlign - 1) / kAlign * kAlign;
+    std::uint64_t cursor = (tableOffset + 8 + std::uint64_t{count} * stride + kAlign - 1) / kAlign * kAlign;
     std::vector<std::uint64_t> offsets;
     for (const auto& b : blobs) {
         offsets.push_back(cursor / kAlign);
@@ -108,9 +110,9 @@ ByteBuffer buildPak(const std::vector<FileSpec>& files, int version, std::uint32
 
     pak.put<std::uint32_t>(count);
     pak.put<std::uint32_t>(count * stride);
-    pak.put<std::uint32_t>(0);
     auto entry = [&](std::uint32_t nameOff, std::uint32_t size, std::int64_t offset, std::uint32_t stored) {
         const std::size_t start = pak.bytes.size();
+        pak.put<std::uint32_t>(nameOff * 2654435761u); // fake name hash (the reader doesn't check it)
         pak.put<std::uint32_t>(nameOff);
         pak.put<std::uint32_t>(dirOffset);
         pak.put<std::uint32_t>(size);
@@ -120,9 +122,8 @@ ByteBuffer buildPak(const std::vector<FileSpec>& files, int version, std::uint32
             pak.put<std::uint32_t>(0xDEADBEEF);
             pak.put<std::uint32_t>(stored);
         }
-        while (pak.bytes.size() < start + stride - 4)
+        while (pak.bytes.size() < start + stride)
             pak.bytes.push_back(std::byte{0});
-        pak.put<std::uint32_t>(nameOff * 2654435761u); // fake name hash
     };
     entry(dirOffset, 0, -1, 0);
     for (std::size_t i = 0; i < files.size(); ++i)
@@ -149,6 +150,19 @@ std::vector<FileSpec> sampleFiles()
     auto& tail = files.back().data;
     std::fill(tail.end() - 4, tail.end(), std::byte{0xFF});
     return files;
+}
+
+std::string property(const PropertyList& props, std::string_view name)
+{
+    for (const auto& p : props)
+        if (p.name == name)
+            return p.value;
+    return {};
+}
+
+std::string hex32(std::uint32_t v)
+{
+    return std::format("0x{:08X}", v);
 }
 
 void checkArchive(const ByteBuffer& bytes, const std::vector<FileSpec>& files, const std::string& name)
@@ -224,6 +238,46 @@ TEST_CASE("Replacing entries keeps names, encodings and the other files intact")
     }
 }
 
+TEST_CASE("Blur name and content hashes")
+{
+    // Values taken from the shipped lut_rampak.pak.
+    CHECK(PakArchive::nameHash("\\models\\objects\\shared\\construction") == 0x00D10931u);
+    CHECK(PakArchive::nameHash("\\Models/Objects/Shared/Construction") == 0x00D10931u);
+    CHECK(PakArchive::nameHash("\\ui") == 0x033EA576u);
+
+    CHECK(PakArchive::contentHash({}) == 0u);
+    const auto small = test::sampleData(1000, 1);
+    CHECK(PakArchive::contentHash(small) == (compression::crc32(small) ^ 0xFFFFFFFFu));
+    // Larger data: one ~CRC-32 per 32 KiB block, added together.
+    const auto large = test::sampleData(80000, 2);
+    const ByteSpan l(large);
+    const std::uint32_t expected = (compression::crc32(l.subspan(0, 32768)) ^ 0xFFFFFFFFu)
+                                   + (compression::crc32(l.subspan(32768, 32768)) ^ 0xFFFFFFFFu)
+                                   + (compression::crc32(l.subspan(65536)) ^ 0xFFFFFFFFu);
+    CHECK(PakArchive::contentHash(large) == expected);
+}
+
+TEST_CASE("Replacing writes Blur's content hash, also for files over 32 KiB")
+{
+    auto files = sampleFiles();
+    test::TempFile file("replace_hash.pak", buildPak(files, 2, 40));
+    const auto replacement = test::sampleData(100000, 77);
+    std::string nameHashBefore;
+    {
+        auto pak = PakArchive::open(file.path);
+        REQUIRE(pak);
+        nameHashBefore = property((*pak)->describeEntry(2), "Name hash");
+        auto report = (*pak)->replace(2, replacement);
+        REQUIRE(report);
+        CHECK(report->warnings.empty());
+    }
+    auto pak = PakArchive::open(file.path);
+    REQUIRE(pak);
+    CHECK((*pak)->read(2).value() == replacement);
+    CHECK(property((*pak)->describeEntry(2), "Hash") == hex32(PakArchive::contentHash(replacement)));
+    CHECK(property((*pak)->describeEntry(2), "Name hash") == nameHashBefore); // name unchanged
+}
+
 TEST_CASE("Replacing in a v1 archive")
 {
     std::vector<FileSpec> files{{"a.fxb", test::sampleData(4000, 9), Storage::Zlib},
@@ -268,8 +322,13 @@ TEST_CASE("Real Blur archives (set BLUR_DIR to enable)")
     REQUIRE(pak);
     CHECK((*pak)->entries().size() == 48);
     for (std::size_t i = 0; i < (*pak)->entries().size(); ++i) {
+        const auto& entry = (*pak)->entries()[i];
+        INFO(entry.path);
         auto data = (*pak)->read(i);
         REQUIRE(data);
-        CHECK(data->size() == (*pak)->entries()[i].size);
+        CHECK(data->size() == entry.size);
+        const auto props = (*pak)->describeEntry(i);
+        CHECK(property(props, "Hash") == hex32(PakArchive::contentHash(*data)));
+        CHECK(property(props, "Name hash") == hex32(PakArchive::nameHash("\\" + entry.path)));
     }
 }

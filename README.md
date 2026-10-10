@@ -2,7 +2,7 @@
 
 A modern, modular **game archive viewer** for Windows, written in C++23 with Qt 6.
 Pick a game, point it at the install folder, and browse every packed and loose
-file in one tree — with texture previews, a hex view, chunk-structure inspection
+file like in OpenIV — with texture previews, a hex view, chunk-structure inspection
 and bulk extraction.
 
 The first supported game is **Blur** (Bizarre Creations, 2010). The code is split
@@ -17,8 +17,12 @@ system, image decoders, the UI — is shared by every future game module.
 
 - **Game picker** at start-up: choose a game, browse to its folder, the app
   checks it really is that game's install and remembers it.
-- **One tree for everything**: the install folder is shown as-is and every archive
-  inside it is expandable like a folder.
+- **Explorer-style browsing** (like OpenIV / RPF Explorer): the tree on the left
+  shows the install folder with every archive openable like a folder; the list on
+  the right shows what's inside the selected folder or archive. **Double-click**
+  (or `Enter`) enters a folder or opens a file's preview; **Backspace** goes back.
+  The path bar above the list is clickable, and **search** (`Ctrl+F`) finds files
+  anywhere below the open folder.
 - **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`), text,
   a fast hex view, a **Structure** tab for chunked formats, and a **Properties**
   tab (compression, offsets, hashes…).
@@ -35,7 +39,7 @@ system, image decoders, the UI — is shared by every future game module.
     `<archive>.bak`). Replacing offers *Back Up & Replace*; nothing is backed up
     behind your back.
   - **Restore Original** from the backup.
-- **Picks up where you left off**: the last game (and selected file) reopens at
+- **Picks up where you left off**: the last game (and open folder or file) reopens at
   start-up. Toggle with *File ▸ Reopen Last Game at Startup*. Settings live in
   `%APPDATA%\26Viewer\26Viewer.ini`.
 - **Modern Windows UI**: Windows 11 style, light/dark mode that follows the OS
@@ -77,10 +81,10 @@ Run `build/release/bin/26Viewer.exe` (or `dist/release/26Viewer.exe`).
 26viewer-cli replace "F:/Games/BLUR/cache/root.pak" graphics/textures/flags/amboyflag.texture my_flag.texture
 ```
 
-> **Modding note (Blur):** replaced files are written correctly, but the game's
-> per-file checksum is only understood for files up to 32 KiB, and
-> `gamedata*.pak` are signed (`.sig`). If the game rejects a modified archive,
-> those are the likely reasons — use *Restore Original* to undo.
+> **Modding note (Blur):** replaced files are written with the same checksums
+> the game computes, but `gamedata*.pak` are signed (`.sig`). If the game
+> rejects a modified signed archive, that is the likely reason — use
+> *Restore Original* to undo.
 
 The GUI also accepts a path (`26Viewer.exe F:\Games\BLUR`), and
 `--select <virtual path> --theme dark --edit-mode --screenshot out.png` for scripted UI captures.

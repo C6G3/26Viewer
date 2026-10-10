@@ -67,7 +67,8 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
         });
     };
     QObject::connect(&window, &viewer::app::MainWindow::sessionChanged, &window, [&window, o, capture] {
-        if (o.select.isEmpty() || !window.selectPath(o.select)) {
+        // A folder (or nothing) is shown at once; a file once its preview has loaded.
+        if (o.select.isEmpty() || !window.selectPath(o.select) || !window.previewShowing()) {
             capture();
             return;
         }

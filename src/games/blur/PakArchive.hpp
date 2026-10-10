@@ -26,6 +26,14 @@ public:
     /// the entry's record at it (other entries are untouched).
     Result<ReplaceReport> replace(std::size_t index, ByteSpan data) const override;
 
+    /// Blur's name hash: CRC-32 without the final inversion over the lower-case
+    /// in-archive path with backslashes, e.g. `\models\cars\a.model`. The file
+    /// table is sorted by it (the game binary-searches it).
+    static std::uint32_t nameHash(std::string_view archivePath) noexcept;
+    /// Blur's content hash: the 32-bit sum of `~crc32(block)` over every
+    /// 32 KiB block of the uncompressed data.
+    static std::uint32_t contentHash(ByteSpan data) noexcept;
+
 private:
     /// Format-specific data kept alongside each public ArchiveEntry.
     struct Slot {

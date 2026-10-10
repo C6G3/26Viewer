@@ -32,21 +32,31 @@ def parse(path):
 
     table = (names_off + names_size + align - 1) // align * align
     f.seek(table)
-    count, table_bytes, _ = struct.unpack("<III", f.read(12))
+    count, table_bytes = struct.unpack("<II", f.read(8))
     stride = table_bytes // count  # 32 (v1), 40 or 64 (v2)
     entries = []
     for _ in range(count):
         raw = f.read(stride)
-        name_off, parent, size, filetime, offset = struct.unpack_from("<IIIQq", raw, 0)
-        stored = struct.unpack_from("<I", raw, 32)[0] if version >= 2 else None
+        name_hash, name_off, parent, size, filetime, offset = struct.unpack_from("<IIIIQq", raw, 0)
+        content_hash, stored = struct.unpack_from("<II", raw, 32) if version >= 2 else (None, None)
         name = names[name_off:names.index(b"\0", name_off)].decode("latin1")
         if offset != -1:  # -1 marks directory records
-            entries.append((name, size, offset * align, stored))
+            entries.append((name, size, offset * align, stored, name_hash, content_hash))
     return f, version, entries
 
 
+def name_hash(path):
+    """CRC-32 without the final inversion of the lower-case path, e.g. "\\ui\\a.texture"."""
+    return zlib.crc32(path.lower().replace("/", "\\").encode("latin1")) ^ 0xFFFFFFFF
+
+
+def content_hash(data):
+    """32-bit sum of ~crc32 over each 32 KiB block of the uncompressed data."""
+    return sum(zlib.crc32(data[i:i + 0x8000]) ^ 0xFFFFFFFF for i in range(0, len(data), 0x8000)) & 0xFFFFFFFF
+
+
 def read(f, version, entry):
-    name, size, pos, stored = entry
+    name, size, pos, stored = entry[:4]
     f.seek(pos)
     if version < 2:
         z = struct.unpack("<I", f.read(4))[0]
@@ -84,9 +94,12 @@ def main():
     for e in entries:
         if sys.argv[1] == "list":
             print(f"{e[1]:>10}  {e[0]}")
-        elif len(read(f, version, e)) != e[1]:
-            bad += 1
-            print("FAIL", e[0])
+        else:
+            data = read(f, version, e)
+            hashes_ok = name_hash(e[0]) == e[4] and (e[5] is None or content_hash(data) == e[5])
+            if len(data) != e[1] or not hashes_ok:
+                bad += 1
+                print("FAIL", e[0])
     print(f"{len(entries)} files, version {version}, {bad} failures", file=sys.stderr)
     return 1 if bad else 0
 
