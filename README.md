@@ -1,2 +1,104 @@
 # 26Viewer
-Game Asset Viewer
+
+A modern, modular **game archive viewer** for Windows, written in C++23 with Qt 6.
+Pick a game, point it at the install folder, and browse every packed and loose
+file in one tree — with texture previews, a hex view, chunk-structure inspection
+and bulk extraction.
+
+The first supported game is **Blur** (Bizarre Creations, 2010). The code is split
+so that everything not specific to Blur — archive abstractions, the virtual file
+system, image decoders, the UI — is shared by every future game module.
+
+| Dark (follows Windows) | Light |
+|---|---|
+| ![Dark mode](docs/images/screenshot-dark.png) | ![Light mode](docs/images/screenshot-light.png) |
+
+## Features
+
+- **Game picker** at start-up: choose a game, browse to its folder, the app
+  checks it really is that game's install and remembers it.
+- **One tree for everything**: the install folder is shown as-is and every archive
+  inside it is expandable like a folder.
+- **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`), text,
+  a fast hex view, a **Structure** tab for chunked formats, and a **Properties**
+  tab (compression, offsets, hashes…).
+- **Extraction** of a selection or everything, on a background thread with
+  progress and cancel; paths are sanitised so archives can never write outside
+  the chosen folder.
+- **Modern Windows UI**: Windows 11 style, light/dark mode that follows the OS
+  *live* (or forced via *View ▸ Theme*), Fluent icons, dark title bar,
+  per-monitor high-DPI.
+- **CLI** (`26viewer-cli`) for scripted listing, verification and extraction.
+
+## Supported games
+
+| Game | Archives | Previews |
+|---|---|---|
+| Blur (PC) | `cache/*.pak` (2KAP v1 & v2: stored, zlib, chunked deflate) | `.texture`, `.dds`, text, chunk structure of `.model`/`.level`/`.font`… |
+
+Format notes live in [docs/formats/](docs/formats/).
+
+## Quick start
+
+Requires [MSYS2](https://www.msys2.org/) (UCRT64). Full instructions, including
+the one-line package install, are in [docs/BUILDING.md](docs/BUILDING.md).
+
+```bash
+cmake --preset release
+cmake --build --preset release
+ctest --preset release
+cmake --install build/release      # self-contained app in dist/release/
+```
+
+Run `build/release/bin/26Viewer.exe` (or `dist/release/26Viewer.exe`).
+
+### Command line
+
+```bash
+26viewer-cli games
+26viewer-cli info    "F:/Games/BLUR/cache/root.pak"
+26viewer-cli list    "F:/Games/BLUR" texture
+26viewer-cli verify  "F:/Games/BLUR"
+26viewer-cli extract "F:/Games/BLUR/cache/root.pak" out/ graphics/textures
+```
+
+The GUI also accepts a path (`26Viewer.exe F:\Games\BLUR`), and
+`--select <virtual path> --theme dark --screenshot out.png` for scripted UI captures.
+
+## Project layout
+
+```
+26Viewer/
+├─ CMakeLists.txt, CMakePresets.json   build entry points
+├─ cmake/            build helpers (warnings, game module selection, deployment)
+├─ src/
+│  ├─ core/          game-agnostic library (no Qt): archives, VFS, decoders, registries
+│  ├─ games/
+│  │  └─ blur/       Blur module: PAK reader, chunk files, textures
+│  ├─ cli/           26viewer-cli
+│  └─ app/           Qt 6 desktop application
+├─ resources/        icons
+├─ tests/            Catch2 unit tests (synthetic archives, no game data needed)
+├─ tools/research/   Python prototypes used to reverse-engineer formats
+├─ docs/             architecture, building, roadmap, format specs
+├─ build/            (generated, git-ignored)
+└─ dist/             (generated, git-ignored) deployable app folders
+```
+
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces fit, and
+[docs/ROADMAP.md](docs/ROADMAP.md) for what comes next.
+
+## Adding a game
+
+1. Create `src/games/<name>/` with a `CMakeLists.txt` building `viewer_game_<name>`.
+2. Implement `viewer::Game` and `void viewer::games::<name>::registerModule(GameRegistry&)`.
+3. Add `<name>` to `VIEWER_GAMES` (`cmake --preset release -DVIEWER_GAMES="blur;<name>"`).
+
+The step-by-step version is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#adding-a-game).
+
+## Legal
+
+This tool reads files from games you own. It contains no game data; never commit
+extracted assets to the repository.
+
+Licensed under the [MIT License](LICENSE).

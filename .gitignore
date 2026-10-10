@@ -1,0 +1,23 @@
+# Build output
+/build/
+/dist/
+/out/
+
+# IDE / tooling
+/.vs/
+/.vscode/*
+!/.vscode/extensions.json
+/.idea/
+/.cache/
+compile_commands.json
+CMakeUserPresets.json
+*.user
+
+# Python research tools
+__pycache__/
+*.pyc
+
+# Never commit game data
+*.pak
+*.bik
+extracted/
