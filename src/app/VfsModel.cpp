@@ -20,15 +20,44 @@ QString sizeText(std::uint64_t bytes)
 
 VfsModel::VfsModel(QObject* parent) : QAbstractItemModel(parent) {}
 
-void VfsModel::setSource(const VfsNode* root, const ContentRegistry* content, const QString& rootLabel,
-                         const QIcon& rootIcon)
+void VfsModel::setRoots(std::vector<Root> roots, const ContentRegistry* content)
 {
     beginResetModel();
-    m_root = root;
+    m_roots = std::move(roots);
     m_content = content;
-    m_rootLabel = rootLabel;
-    m_rootIcon = rootIcon;
     endResetModel();
+}
+
+void VfsModel::appendRoot(Root root)
+{
+    const int row = static_cast<int>(m_roots.size());
+    beginInsertRows({}, row, row);
+    m_roots.push_back(std::move(root));
+    endInsertRows();
+}
+
+void VfsModel::removeRoot(int row)
+{
+    if (row < 0 || row >= static_cast<int>(m_roots.size()))
+        return;
+    beginRemoveRows({}, row, row);
+    m_roots.erase(m_roots.begin() + row);
+    endRemoveRows();
+}
+
+int VfsModel::rootRow(const VfsNode* node) const
+{
+    for (std::size_t i = 0; i < m_roots.size(); ++i)
+        if (m_roots[i].node == node)
+            return static_cast<int>(i);
+    return -1;
+}
+
+const VfsNode* VfsModel::topOf(const VfsNode* node) const
+{
+    while (node && !isRoot(node))
+        node = node->parent();
+    return node;
 }
 
 const VfsNode* VfsModel::nodeFromIndex(const QModelIndex& index)
@@ -38,11 +67,11 @@ const VfsNode* VfsModel::nodeFromIndex(const QModelIndex& index)
 
 QModelIndex VfsModel::indexForNode(const VfsNode* node, int column) const
 {
-    if (!node || !m_root)
+    if (!node)
         return {};
-    if (node == m_root)
-        return createIndex(0, column, const_cast<VfsNode*>(node));
-    if (!node->parent())
+    if (const int row = rootRow(node); row >= 0)
+        return createIndex(row, column, const_cast<VfsNode*>(node));
+    if (!node->parent() || !topOf(node)) // not shown (e.g. the folder around a mounted archive)
         return {};
     return createIndex(static_cast<int>(node->row()), column, const_cast<VfsNode*>(node));
 }
@@ -51,8 +80,10 @@ QModelIndex VfsModel::index(int row, int column, const QModelIndex& parent) cons
 {
     if (column < 0 || column >= ColumnCount || row < 0)
         return {};
-    if (!parent.isValid()) // the single top-level row is the root
-        return row == 0 && m_root ? createIndex(0, column, const_cast<VfsNode*>(m_root)) : QModelIndex{};
+    if (!parent.isValid()) // top-level rows: the mounts
+        return row < static_cast<int>(m_roots.size())
+                   ? createIndex(row, column, const_cast<VfsNode*>(m_roots[static_cast<std::size_t>(row)].node))
+                   : QModelIndex{};
     const VfsNode* p = nodeFromIndex(parent);
     if (!p || static_cast<std::size_t>(row) >= p->children().size())
         return {};
@@ -62,10 +93,11 @@ QModelIndex VfsModel::index(int row, int column, const QModelIndex& parent) cons
 QModelIndex VfsModel::parent(const QModelIndex& child) const
 {
     const VfsNode* node = nodeFromIndex(child);
-    if (!node || node == m_root || !node->parent())
+    if (!node || isRoot(node) || !node->parent())
         return {};
     const VfsNode* p = node->parent();
-    return createIndex(p == m_root ? 0 : static_cast<int>(p->row()), 0, const_cast<VfsNode*>(p));
+    const int rootIndex = rootRow(p);
+    return createIndex(rootIndex >= 0 ? rootIndex : static_cast<int>(p->row()), 0, const_cast<VfsNode*>(p));
 }
 
 int VfsModel::rowCount(const QModelIndex& parent) const
@@ -73,7 +105,7 @@ int VfsModel::rowCount(const QModelIndex& parent) const
     if (parent.column() > 0)
         return 0;
     if (!parent.isValid())
-        return m_root ? 1 : 0;
+        return static_cast<int>(m_roots.size());
     const VfsNode* p = nodeFromIndex(parent);
     return p ? static_cast<int>(p->children().size()) : 0;
 }
@@ -96,11 +128,12 @@ QVariant VfsModel::data(const QModelIndex& index, int role) const
         return m_content ? m_content->fileTypes().lookup(node->name()) : FileTypeInfo{};
     };
 
-    const bool isRoot = node == m_root;
+    const int rootIndex = rootRow(node);
+    const Root* root = rootIndex >= 0 ? &m_roots[static_cast<std::size_t>(rootIndex)] : nullptr;
     switch (role) {
     case Qt::DisplayRole:
         switch (index.column()) {
-        case Name: return isRoot ? m_rootLabel : toQString(node->name());
+        case Name: return root ? root->label : toQString(node->name());
         case Type:
             if (node->kind() == VfsNode::Kind::Folder)
                 return tr("Folder");
@@ -135,8 +168,8 @@ QVariant VfsModel::data(const QModelIndex& index, int role) const
     case Qt::DecorationRole:
         if (index.column() != Name)
             return {};
-        if (isRoot && !m_rootIcon.isNull())
-            return m_rootIcon;
+        if (root && !root->icon.isNull())
+            return root->icon;
         switch (node->kind()) {
         case VfsNode::Kind::Folder: return icons::folder();
         case VfsNode::Kind::Archive: return icons::archive();
@@ -149,7 +182,7 @@ QVariant VfsModel::data(const QModelIndex& index, int role) const
         break;
     case Qt::ToolTipRole:
         if (index.column() == Name)
-            return isRoot ? m_rootLabel : toQString(node->virtualPath());
+            return root ? root->tooltip : toQString(node->virtualPath());
         break;
     }
     return {};
@@ -212,6 +245,8 @@ void VfsFilterModel::setContainersOnly(bool on)
 
 bool VfsFilterModel::lessThan(const QModelIndex& left, const QModelIndex& right) const
 {
+    if (!left.parent().isValid() && !right.parent().isValid())
+        return left.row() < right.row(); // top-level mounts stay in the order they were opened
     const VfsNode* a = VfsModel::nodeFromIndex(left);
     const VfsNode* b = VfsModel::nodeFromIndex(right);
     if (a && b && a->isContainer() != b->isContainer()) {

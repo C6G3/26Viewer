@@ -39,6 +39,10 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [ ] Recent games / recent archives menu (File ▸ Recent)
 4a. [x] OpenIV-style browsing: folder/archive tree → contents list → double-click to preview,
    Backspace back, clickable path bar, search within the open folder, Properties (`Alt+Enter`)
+   - [x] Previews open in their own windows (toolbar for per-file tools, drop-to-replace)
+   - [x] Game's .exe icon on the tree's top node; optional files in the tree
+   - [x] Open archives / any folder alongside the game (extra top-level entries, remembered per game)
+   - [ ] Per-file tools in the preview window: image channels, mip selector, export PNG
 4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
    - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
    - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups

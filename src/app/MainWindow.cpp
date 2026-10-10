@@ -7,6 +7,7 @@
 #include "QtConvert.hpp"
 #include "Theme.hpp"
 #include "VfsModel.hpp"
+#include "PreviewWindow.hpp"
 #include "preview/PreviewPane.hpp"
 
 #include "viewer/core/RandomAccessFile.hpp"
@@ -18,6 +19,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QFileDialog>
+#include <QFileIconProvider>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QLabel>
@@ -57,6 +59,53 @@ QString sizeText(std::uint64_t bytes)
     return QLocale().formattedDataSize(static_cast<qint64>(bytes), 1, QLocale::DataSizeTraditionalFormat);
 }
 
+/// A game shows its own .exe icon at the top of the tree (Windows reads it
+/// from the executable's resources); otherwise a generic gamepad.
+QIcon gameIcon(const Session& session)
+{
+    if (const std::string& exe = session.game->info().executable; !exe.empty()) {
+        const QFileInfo info(toQString(session.source / exe));
+        if (info.isFile())
+            if (QIcon icon = QFileIconProvider().icon(info); !icon.isNull())
+                return icon;
+    }
+    return icons::theme(QIcon::ThemeIcon::InputGaming, QStyle::SP_DirIcon);
+}
+
+/// The tree's top-level rows: the main mount, then everything opened alongside it.
+VfsModel::Root mainRoot(const Session& session)
+{
+    const QString where = QDir::toNativeSeparators(toQString(session.source));
+    if (session.game)
+        return {&session.vfs.root(), session.title(), where, gameIcon(session)};
+    std::error_code ec;
+    const bool folder = std::filesystem::is_directory(session.source, ec);
+    return {&session.vfs.root(), session.title(), where, folder ? icons::folder() : icons::archive()};
+}
+
+VfsModel::Root extraRoot(const Session::Extra& extra)
+{
+    const QString where = QDir::toNativeSeparators(toQString(extra.source));
+    const bool archive = extra.top->kind() == VfsNode::Kind::Archive;
+    return {extra.top, toQString(extra.source.filename()), where, archive ? icons::archive() : icons::folder()};
+}
+
+/// Walks `path` ("a/b/c") down from `start`, ignoring case.
+const VfsNode* walk(const VfsNode* start, const QString& path)
+{
+    const VfsNode* node = start;
+    for (const QString& part : path.split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
+        const VfsNode* next = nullptr;
+        for (const auto& child : node->children())
+            if (toQString(child->name()).compare(part, Qt::CaseInsensitive) == 0)
+                next = child.get();
+        if (!next)
+            return nullptr;
+        node = next;
+    }
+    return node;
+}
+
 } // namespace
 
 MainWindow::MainWindow(const GameRegistry& games, ThemeManager& theme, QWidget* parent)
@@ -64,19 +113,19 @@ MainWindow::MainWindow(const GameRegistry& games, ThemeManager& theme, QWidget* 
       m_extractWatcher(new QFutureWatcher<ExtractSummary>(this)),
       m_editWatcher(new QFutureWatcher<EditResult>(this)), m_model(new VfsModel(this)),
       m_treeFilter(new VfsFilterModel(this)), m_leftStack(nullptr), m_tree(nullptr), m_placeholder(nullptr),
-      m_rightStack(nullptr), m_folderView(nullptr), m_preview(nullptr), m_search(nullptr), m_statusLabel(new QLabel(this)), m_progress(new QProgressBar(this)),
-      m_cancel(new QToolButton(this))
+      m_folderView(nullptr), m_search(nullptr), m_statusLabel(new QLabel(this)), m_progress(new QProgressBar(this)),
+      m_cancel(new QToolButton(this)), m_mountWatcher(new QFutureWatcher<MountResult>(this))
 {
     setWindowTitle(appName());
     setWindowIcon(icons::appIcon());
     setAcceptDrops(true);
     m_treeFilter->setSourceModel(m_model);
-    m_treeFilter->setContainersOnly(true);
 
     buildActions();
     buildUi();
 
     connect(m_loadWatcher, &QFutureWatcher<LoadResult>::finished, this, &MainWindow::onLoadFinished);
+    connect(m_mountWatcher, &QFutureWatcher<MountResult>::finished, this, &MainWindow::onMountFinished);
     connect(m_extractWatcher, &QFutureWatcher<ExtractSummary>::finished, this, &MainWindow::onExtractFinished);
     connect(m_extractWatcher, &QFutureWatcher<ExtractSummary>::progressRangeChanged, m_progress,
             &QProgressBar::setRange);
@@ -97,7 +146,10 @@ MainWindow::MainWindow(const GameRegistry& games, ThemeManager& theme, QWidget* 
 
 MainWindow::~MainWindow()
 {
+    for (PreviewWindow* w : previewWindows()) // top-level windows without a parent
+        delete w;
     m_loadWatcher->waitForFinished();
+    m_mountWatcher->waitForFinished();
     m_extractWatcher->waitForFinished();
     m_editWatcher->waitForFinished();
 }
@@ -116,8 +168,13 @@ void MainWindow::buildActions()
     m_openArchiveAction =
         new QAction(icons::theme(TI::DocumentOpen, QStyle::SP_DialogOpenButton), tr("Open &Archive…"), this);
     m_openArchiveAction->setShortcut(QKeySequence::Open);
-    m_openArchiveAction->setStatusTip(tr("Browse a single archive file"));
+    m_openArchiveAction->setStatusTip(tr("Open an archive (added alongside the open game)"));
     connect(m_openArchiveAction, &QAction::triggered, this, &MainWindow::openArchiveDialog);
+
+    m_openFolderAction = new QAction(icons::theme(TI::FolderOpen, QStyle::SP_DirOpenIcon), tr("Open &Folder…"), this);
+    m_openFolderAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_O));
+    m_openFolderAction->setStatusTip(tr("Open any folder — a mod workspace, say — alongside the open game"));
+    connect(m_openFolderAction, &QAction::triggered, this, &MainWindow::openFolderDialog);
 
     m_extractAction =
         new QAction(icons::theme(TI::DocumentSaveAs, QStyle::SP_DialogSaveButton), tr("&Extract Selected…"), this);
@@ -198,6 +255,7 @@ void MainWindow::buildActions()
     QMenu* file = menuBar()->addMenu(tr("&File"));
     file->addAction(m_openGameAction);
     file->addAction(m_openArchiveAction);
+    file->addAction(m_openFolderAction);
     file->addSeparator();
     file->addAction(m_extractAction);
     file->addAction(m_extractAllAction);
@@ -224,7 +282,19 @@ void MainWindow::buildActions()
         m_search->selectAll();
     });
 
+    auto* showFiles = new QAction(tr("Show &Files in Tree"), this);
+    showFiles->setCheckable(true);
+    showFiles->setChecked(QSettings().value("view/treeShowsFiles", true).toBool());
+    showFiles->setStatusTip(tr("Off: the tree lists only folders and archives, like OpenIV"));
+    m_treeFilter->setContainersOnly(!showFiles->isChecked());
+    connect(showFiles, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("view/treeShowsFiles", on);
+        m_treeFilter->setContainersOnly(!on);
+    });
+
     QMenu* view = menuBar()->addMenu(tr("&View"));
+    view->addAction(showFiles);
+    view->addSeparator();
     view->addAction(m_backAction);
     view->addAction(m_propertiesAction);
     view->addSeparator();
@@ -286,6 +356,7 @@ void MainWindow::buildUi()
     toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     toolbar->addAction(m_openGameAction);
     toolbar->addAction(m_openArchiveAction);
+    toolbar->addAction(m_openFolderAction);
     toolbar->addSeparator();
     toolbar->addAction(m_extractAction);
     toolbar->addAction(m_extractAllAction);
@@ -315,12 +386,11 @@ void MainWindow::buildUi()
     filterTimer->setInterval(200);
     connect(m_search, &QLineEdit::textChanged, filterTimer, qOverload<>(&QTimer::start));
     connect(filterTimer, &QTimer::timeout, this, [this] {
-        showList();
         m_folderView->setFilterText(m_search->text().trimmed());
         updateActions();
     });
 
-    // Navigation tree: folders and archives only (their contents go in the list).
+    // Navigation tree (optionally folders and archives only: View ▸ Show Files in Tree).
     m_tree = new QTreeView(this);
     m_tree->setModel(m_treeFilter);
     m_tree->setHeaderHidden(true);
@@ -333,18 +403,31 @@ void MainWindow::buildUi()
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeView::customContextMenuRequested, this, &MainWindow::showTreeContextMenu);
     connect(m_tree->selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& index) {
-        showList();
-        m_folderView->setFolder(VfsModel::nodeFromIndex(m_treeFilter->mapToSource(index)));
+        // A folder opens in the list; a file shows its folder with the file selected.
+        const VfsNode* node = VfsModel::nodeFromIndex(m_treeFilter->mapToSource(index));
+        const VfsNode* folder = node && node->isFile() ? node->parent() : node;
+        if (folder != m_folderView->folder())
+            m_folderView->setFolder(folder);
+        if (node && node->isFile())
+            m_folderView->selectNode(node);
         updateBackupBanner();
         updateActions();
     });
+    connect(m_tree, &QTreeView::activated, this, [this](const QModelIndex& index) {
+        if (const VfsNode* node = VfsModel::nodeFromIndex(m_treeFilter->mapToSource(index)); node && node->isFile())
+            openPreview(node); // folders just expand on double-click
+    });
+    // Files dragged from Explorer onto a file in the tree replace it too.
+    m_tree->setAcceptDrops(true);
+    m_tree->viewport()->setAcceptDrops(true);
+    m_tree->viewport()->installEventFilter(this);
 
     m_placeholder = buildPlaceholder();
     m_leftStack = new QStackedWidget(this);
     m_leftStack->addWidget(m_placeholder);
     m_leftStack->addWidget(m_tree);
 
-    // Right: the open folder's contents; double-click a file to preview it.
+    // Right: the open folder's contents; double-click a file to open it in a preview window.
     m_folderView = new FolderView(m_model, this);
     m_folderView->setPlaceholder(QString(), tr("Open a game or an archive to see its contents here."));
     m_folderView->restoreHeaderState(QSettings().value("window/listHeader").toByteArray());
@@ -358,20 +441,14 @@ void MainWindow::buildUi()
             [this](const VfsNode* folder) { navigateTo(folder, m_folderView->folder()); });
     connect(m_folderView, &FolderView::selectionChanged, this, &MainWindow::updateActions);
     connect(m_folderView, &FolderView::contextMenuRequested, this, &MainWindow::showListContextMenu);
-    connect(m_folderView->banner(), &BackupBanner::backupRequested, this, &MainWindow::backupCurrent);
-
-    m_preview = new PreviewPane(this);
-    connect(m_preview, &PreviewPane::backRequested, this, &MainWindow::showList);
-
-    m_rightStack = new QStackedWidget(this);
-    m_rightStack->addWidget(m_folderView);
-    m_rightStack->addWidget(m_preview);
-    m_rightStack->addAction(m_backAction);
+    connect(m_folderView->banner(), &BackupBanner::backupRequested, this,
+            [this] { backupNode(m_folderView->folder()); });
+    m_folderView->addAction(m_backAction);
 
     auto* splitter = new QSplitter(Qt::Horizontal, this);
     splitter->setObjectName("mainSplitter");
     splitter->addWidget(m_leftStack);
-    splitter->addWidget(m_rightStack);
+    splitter->addWidget(m_folderView);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setChildrenCollapsible(false);
@@ -405,7 +482,6 @@ void MainWindow::buildUi()
     m_editModeBadge->hide();
     statusBar()->addPermanentWidget(m_editModeBadge);
 
-    connect(m_preview, &PreviewPane::backupRequested, this, &MainWindow::backupCurrent);
 }
 
 // ---- Opening -------------------------------------------------------------------------------
@@ -427,26 +503,58 @@ bool MainWindow::chooseGame()
 void MainWindow::openPath(const QString& path)
 {
     const QFileInfo info(path);
-    if (info.isDir()) {
-        if (const Game* game = m_games.detect(toPath(info.absoluteFilePath()))) {
-            openGame(*game, toPath(info.absoluteFilePath()));
-            return;
-        }
-        QMessageBox::warning(this, appName(),
-                             tr("None of the games in this build recognise\n%1").arg(QDir::toNativeSeparators(path)));
-        return;
-    }
-    if (info.isFile()) {
+    if (info.isDir())
+        openFolder(toPath(info.absoluteFilePath()));
+    else if (info.isFile())
         openArchive(toPath(info.absoluteFilePath()));
-        return;
-    }
-    QMessageBox::warning(this, appName(), tr("%1 does not exist.").arg(QDir::toNativeSeparators(path)));
+    else
+        QMessageBox::warning(this, appName(), tr("%1 does not exist.").arg(QDir::toNativeSeparators(path)));
 }
 
 void MainWindow::openGame(const Game& game, const std::filesystem::path& directory)
 {
-    startLoad(tr("Loading %1…").arg(toQString(game.info().title)), [&game, directory] {
-        return LoadResult{std::shared_ptr<Session>(openGameSession(game, directory)), {}};
+    // Each game remembers the archives/folders opened alongside it.
+    std::vector<std::filesystem::path> extras;
+    for (const QString& extra : QSettings().value(extrasKey(&game)).toStringList())
+        extras.push_back(toPath(extra));
+    openSource(&game, directory, std::move(extras), {});
+}
+
+QString MainWindow::extrasKey(const Game* game)
+{
+    return game ? QStringLiteral("games/%1/extras").arg(toQString(game->info().id))
+                : QStringLiteral("session/extras");
+}
+
+void MainWindow::openSource(const Game* game, const std::filesystem::path& source,
+                            std::vector<std::filesystem::path> extras, const QString& select)
+{
+    const GameRegistry* games = &m_games;
+    const QString name = game ? toQString(game->info().title) : toQString(source.filename());
+    m_pendingSelect = select;
+    startLoad(tr("Opening %1…").arg(name), [games, game, source, extras = std::move(extras)] {
+        LoadResult result;
+        std::error_code ec;
+        if (game) {
+            result.session = openGameSession(*game, source);
+        } else if (std::filesystem::is_directory(source, ec)) {
+            result.session = openFolderSession(*games, source);
+        } else {
+            auto session = openArchiveSession(*games, source);
+            if (!session)
+                return LoadResult{nullptr, toQString(session.error().message), {}};
+            result.session = std::move(*session);
+        }
+        // Remount what was open alongside it (after a reload or at start-up).
+        for (const auto& path : extras) {
+            if (!std::filesystem::exists(path, ec))
+                continue;
+            if (auto extra = mountExtra(result.session->content, path))
+                result.session->extras.push_back(std::move(*extra));
+            else
+                result.warnings << toQString(extra.error().message);
+        }
+        return result;
     });
 }
 
@@ -454,32 +562,139 @@ void MainWindow::openArchiveDialog()
 {
     QSettings settings;
     QStringList patterns;
-    for (const auto& g : m_games.games()) {
-        ContentRegistry probe;
-        g->registerContent(probe);
-        for (const auto& format : probe.archiveFormats())
+    const auto addPatterns = [&](const ContentRegistry& content) {
+        for (const auto& format : content.archiveFormats())
             for (const auto& ext : format->extensions())
                 patterns << QStringLiteral("*.%1").arg(toQString(ext));
+    };
+    if (m_session) { // only archives the open game understands
+        addPatterns(m_session->content);
+    } else {
+        for (const auto& g : m_games.games()) {
+            ContentRegistry probe;
+            g->registerContent(probe);
+            addPatterns(probe);
+        }
     }
     patterns.removeDuplicates();
     const QString filter = tr("Archives (%1);;All files (*)").arg(patterns.join(' '));
-    const QString file = QFileDialog::getOpenFileName(this, tr("Open Archive"),
-                                                      settings.value("paths/lastArchiveDir").toString(), filter);
+    const QString title = m_session ? tr("Open Archive alongside %1").arg(m_session->title()) : tr("Open Archive");
+    const QString file =
+        QFileDialog::getOpenFileName(this, title, settings.value("paths/lastArchiveDir").toString(), filter);
     if (file.isEmpty())
         return;
     settings.setValue("paths/lastArchiveDir", QFileInfo(file).absolutePath());
     openArchive(toPath(file));
 }
 
+void MainWindow::openFolderDialog()
+{
+    QSettings settings;
+    const QString title = m_session ? tr("Open Folder alongside %1").arg(m_session->title()) : tr("Open Folder");
+    const QString dir = QFileDialog::getExistingDirectory(this, title, settings.value("paths/lastFolderDir").toString());
+    if (dir.isEmpty())
+        return;
+    settings.setValue("paths/lastFolderDir", dir);
+    openFolder(toPath(dir));
+}
+
 void MainWindow::openArchive(const std::filesystem::path& file)
 {
-    const GameRegistry* games = &m_games;
-    startLoad(tr("Opening %1…").arg(toQString(file.filename())), [games, file] {
-        auto session = openArchiveSession(*games, file);
-        if (!session)
-            return LoadResult{nullptr, toQString(session.error().message)};
-        return LoadResult{std::shared_ptr<Session>(std::move(*session)), {}};
-    });
+    if (m_session)
+        addMount(file);
+    else
+        openSource(nullptr, file, {}, {});
+}
+
+void MainWindow::openFolder(const std::filesystem::path& directory)
+{
+    if (const Game* game = m_games.detect(directory)) { // a game install opens as that game
+        openGame(*game, directory);
+        return;
+    }
+    if (m_session)
+        addMount(directory);
+    else
+        openSource(nullptr, directory, {}, {});
+}
+
+// ---- Archives / folders opened alongside the game -------------------------------------------
+
+void MainWindow::addMount(const std::filesystem::path& source)
+{
+    if (!m_session || m_mountWatcher->isRunning() || m_loadWatcher->isRunning())
+        return;
+    // Already open? Just go there.
+    std::error_code ec;
+    for (std::size_t i = 0; i < m_session->extras.size(); ++i) {
+        if (std::filesystem::equivalent(m_session->extras[i]->source, source, ec)) {
+            navigateTo(m_session->extras[i]->top);
+            return;
+        }
+    }
+    if (std::filesystem::equivalent(m_session->source, source, ec)) {
+        navigateTo(&m_session->vfs.root());
+        return;
+    }
+
+    m_statusLabel->setText(tr("Opening %1…").arg(toQString(source.filename())));
+    m_progress->setRange(0, 0);
+    m_progress->show();
+    QApplication::setOverrideCursor(Qt::BusyCursor);
+    // The job keeps the session (and so its content handlers) alive.
+    m_mountWatcher->setFuture(QtConcurrent::run([session = m_session, source] {
+        MountResult result;
+        result.session = session.get();
+        if (auto extra = mountExtra(session->content, source))
+            result.extra = std::move(*extra);
+        else
+            result.error = toQString(extra.error().message);
+        return result;
+    }));
+    updateActions();
+}
+
+void MainWindow::onMountFinished()
+{
+    QApplication::restoreOverrideCursor();
+    m_progress->hide();
+    MountResult result = m_mountWatcher->result();
+    if (!result.extra) {
+        m_statusLabel->setText(tr("Open failed"));
+        QMessageBox::warning(this, appName(), tr("Could not open:\n%1").arg(result.error));
+    } else if (m_session && m_session.get() == result.session) { // still the same session
+        const Session::Extra& extra = *result.extra;
+        m_session->extras.push_back(result.extra);
+        m_model->appendRoot(extraRoot(extra));
+        navigateTo(extra.top);
+        m_tree->expand(m_treeFilter->mapFromSource(m_model->indexForNode(extra.top)));
+        m_statusLabel->setText(tr("Opened %1  ·  %n file(s)", nullptr, static_cast<int>(extra.top->fileCount()))
+                                   .arg(toQString(extra.source.filename())));
+        rememberSession();
+    }
+    updateActions();
+}
+
+void MainWindow::closeMount(const VfsNode* top)
+{
+    if (!m_session || m_editWatcher->isRunning() || m_extractWatcher->isRunning())
+        return;
+    const auto it = std::ranges::find_if(m_session->extras, [top](const auto& e) { return e->top == top; });
+    if (it == m_session->extras.end())
+        return;
+    // Let go of everything that points into it before it is unmounted.
+    for (PreviewWindow* w : previewWindows()) {
+        if (w->node() && m_model->topOf(w->node()) == top) {
+            w->setSession(nullptr); // waits for a running load
+            w->close();
+        }
+    }
+    if (m_folderView->folder() && m_model->topOf(m_folderView->folder()) == top)
+        navigateTo(&m_session->vfs.root());
+    m_model->removeRoot(m_model->rootRow(top));
+    m_session->extras.erase(it);
+    rememberSession();
+    updateActions();
 }
 
 void MainWindow::startLoad(const QString& message, std::function<LoadResult()> job)
@@ -506,11 +721,10 @@ void MainWindow::onLoadFinished()
         return;
     }
     setSession(result.session);
-    const auto& report = result.session->report;
-    if (!report.warnings.empty()) {
-        QStringList lines;
-        for (const auto& w : report.warnings)
-            lines << toQString(w.message);
+    QStringList lines = result.warnings;
+    for (const auto& w : result.session->report.warnings)
+        lines << toQString(w.message);
+    if (!lines.isEmpty()) {
         QMessageBox::warning(this, appName(),
                              tr("Some archives could not be opened:\n\n%1").arg(lines.mid(0, 15).join('\n')));
     }
@@ -518,18 +732,29 @@ void MainWindow::onLoadFinished()
 
 void MainWindow::setSession(std::shared_ptr<Session> session)
 {
-    showList();
-    m_preview->setSession(nullptr);
-    m_model->setSource(nullptr, nullptr);
+    // Preview windows let go of the old session's files first (they may be
+    // about to be restored or rewritten), then follow their file into the new one.
+    for (PreviewWindow* w : previewWindows())
+        w->setSession(nullptr);
+    m_model->setRoots({}, nullptr);
     m_session = std::move(session);
     if (m_session) {
-        m_model->setSource(&m_session->vfs.root(), &m_session->content, m_session->title(),
-                           m_session->game ? icons::theme(QIcon::ThemeIcon::InputGaming, QStyle::SP_DirIcon)
-                                           : QIcon());
-        m_preview->setSession(m_session);
+        std::vector<VfsModel::Root> roots{mainRoot(*m_session)};
+        for (const auto& extra : m_session->extras)
+            roots.push_back(extraRoot(*extra));
+        m_model->setRoots(std::move(roots), &m_session->content);
+        for (PreviewWindow* w : previewWindows()) {
+            if (const VfsNode* node = findLocation(w->location())) {
+                w->setSession(m_session);
+                w->showNode(node);
+                w->setLocation(locationOf(node));
+            } else {
+                w->close(); // the file is gone (or another game was opened)
+            }
+        }
         m_leftStack->setCurrentWidget(m_tree);
-        m_tree->expandToDepth(0);
-        m_tree->setCurrentIndex(m_treeFilter->index(0, 0)); // the game's top level
+        m_tree->expand(m_treeFilter->index(0, 0)); // the game's top level
+        m_tree->setCurrentIndex(m_treeFilter->index(0, 0));
         setWindowTitle(QStringLiteral("%1 — %2").arg(m_session->title(), appName()));
         const VfsNode& root = m_session->vfs.root();
         m_statusLabel->setText(tr("%1  ·  %n archive(s)", nullptr, static_cast<int>(m_session->report.archives))
@@ -538,10 +763,9 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
                                + QStringLiteral("  ·  %1").arg(sizeText(root.size())));
         rememberSession();
         if (!m_pendingSelect.isEmpty()) {
-            selectPath(m_pendingSelect, m_pendingOpen);
+            selectPath(m_pendingSelect, /*openFile=*/false);
             m_pendingSelect.clear();
         }
-        m_pendingOpen = true;
     } else {
         m_leftStack->setCurrentWidget(m_placeholder);
         setWindowTitle(appName());
@@ -552,20 +776,38 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
     emit sessionChanged();
 }
 
-bool MainWindow::selectPath(const QString& virtualPath, bool openFile)
+QString MainWindow::locationOf(const VfsNode* node) const
+{
+    if (!m_session || !node)
+        return {};
+    // Inside the main mount: just the virtual path. Inside an extra mount:
+    // "<its source on disk>|<virtual path>" ('|' can't occur in Windows paths).
+    const VfsNode* top = m_model->topOf(node);
+    for (const auto& extra : m_session->extras)
+        if (extra->top == top)
+            return toQString(extra->source) + QLatin1Char('|') + toQString(node->virtualPath());
+    return toQString(node->virtualPath());
+}
+
+const VfsNode* MainWindow::findLocation(const QString& location) const
 {
     if (!m_session)
+        return nullptr;
+    const qsizetype bar = location.indexOf(QLatin1Char('|'));
+    if (bar < 0)
+        return walk(&m_session->vfs.root(), location);
+    const auto source = toPath(location.left(bar));
+    for (const auto& extra : m_session->extras)
+        if (extra->source == source)
+            return walk(&extra->vfs->root(), location.mid(bar + 1));
+    return nullptr;
+}
+
+bool MainWindow::selectPath(const QString& location, bool openFile)
+{
+    const VfsNode* node = findLocation(location);
+    if (!node)
         return false;
-    const VfsNode* node = &m_session->vfs.root();
-    for (const QString& part : virtualPath.split(QLatin1Char('/'), Qt::SkipEmptyParts)) {
-        const VfsNode* next = nullptr;
-        for (const auto& child : node->children())
-            if (toQString(child->name()).compare(part, Qt::CaseInsensitive) == 0)
-                next = child.get();
-        if (!next)
-            return false;
-        node = next;
-    }
     if (node->isContainer()) {
         navigateTo(node);
         return true;
@@ -579,11 +821,6 @@ bool MainWindow::selectPath(const QString& virtualPath, bool openFile)
 
 // ---- Browsing ----------------------------------------------------------------------------------
 
-bool MainWindow::previewShowing() const
-{
-    return m_rightStack->currentWidget() == m_preview;
-}
-
 const VfsNode* MainWindow::treeNode() const
 {
     return VfsModel::nodeFromIndex(m_treeFilter->mapToSource(m_tree->currentIndex()));
@@ -594,11 +831,8 @@ void MainWindow::navigateTo(const VfsNode* folder, const VfsNode* reveal)
     const QModelIndex index = m_treeFilter->mapFromSource(m_model->indexForNode(folder));
     if (!index.isValid())
         return;
-    if (m_tree->currentIndex() == index)
-        showList();
-    else
-        m_tree->setCurrentIndex(index); // updates the list (see buildUi)
-    m_tree->scrollTo(index); // also expands the tree down to it
+    m_tree->setCurrentIndex(index); // updates the list (see buildUi)
+    m_tree->scrollTo(index);        // also expands the tree down to it
 
     // Coming back up: highlight the child we came from, like Explorer does.
     while (reveal && reveal->parent() != folder)
@@ -617,42 +851,74 @@ void MainWindow::activateNode(const VfsNode* node)
         openPreview(node);
 }
 
-void MainWindow::openPreview(const VfsNode* node, bool properties)
+std::vector<PreviewWindow*> MainWindow::previewWindows() const
 {
-    if (!node)
-        return;
-    if (properties)
-        m_preview->showProperties(node);
-    else
-        m_preview->showNode(node);
-    const VfsNode* folder = m_folderView->folder();
-    m_preview->setBackTarget(folder ? m_model->data(m_model->indexForNode(folder)).toString() : tr("folder"));
-    m_rightStack->setCurrentWidget(m_preview);
-    updateBackupBanner();
-    updateActions();
+    std::vector<PreviewWindow*> windows;
+    for (const auto& w : m_previews)
+        if (w)
+            windows.push_back(w);
+    return windows;
 }
 
-void MainWindow::showList()
+PreviewWindow* MainWindow::openPreview(const VfsNode* node, bool properties)
 {
-    if (!previewShowing())
-        return;
-    const VfsNode* shown = m_preview->node();
-    m_rightStack->setCurrentWidget(m_folderView);
-    m_preview->showNode(nullptr); // stop loading / free the decoded file
-    if (shown)
-        m_folderView->selectNode(shown); // keep your place in the list
-    m_folderView->view()->setFocus();
+    if (!node || !m_session)
+        return nullptr;
+
+    // One window per file: bring an open one to the front.
+    for (PreviewWindow* w : previewWindows()) {
+        if (w->node() == node) {
+            if (properties)
+                w->showNode(node, true);
+            if (w->isMinimized())
+                w->showNormal();
+            w->raise();
+            w->activateWindow();
+            return w;
+        }
+    }
+
+    // A top-level window of its own (own taskbar button, can go on another monitor).
+    auto* w = new PreviewWindow();
+    std::erase_if(m_previews, [](const QPointer<PreviewWindow>& p) { return p.isNull(); });
+    if (!m_previews.empty()) // cascade from the newest window
+        w->move(m_previews.back()->pos() + QPoint(32, 32));
+    m_previews.emplace_back(w);
+    if (m_offscreen)
+        w->setAttribute(Qt::WA_DontShowOnScreen);
+
+    w->setSession(m_session);
+    w->setEditMode(m_editMode);
+    w->showNode(node, properties);
+    w->setLocation(locationOf(node));
+    w->setDropCheck([this, w](const QString& file) { return replaceRefusal(w->node(), file); });
+    connect(w, &PreviewWindow::replaceRequested, this, [this, w](const QString& file) {
+        if (file.isEmpty())
+            replaceWithDialog(w->node(), w);
+        else
+            replaceNode(w->node(), file, w);
+    });
+    connect(w, &PreviewWindow::extractRequested, this, [this, w] {
+        if (const VfsNode* n = w->node())
+            extractNodes({n});
+    });
+    connect(w, &PreviewWindow::revealRequested, this, [this, w] {
+        if (selectPath(w->location(), /*openFile=*/false)) {
+            raise();
+            activateWindow();
+        }
+    });
+    connect(w, &PreviewWindow::backupRequested, this, [this, w] { backupNode(w->node()); });
+
     updateBackupBanner();
-    updateActions();
+    w->show();
+    emit previewOpened(w);
+    return w;
 }
 
 void MainWindow::goBack()
 {
-    if (previewShowing()) {
-        showList();
-        return;
-    }
-    if (const VfsNode* folder = m_folderView->folder(); folder && folder->parent())
+    if (const VfsNode* folder = m_folderView->folder(); folder && !m_model->isRoot(folder))
         navigateTo(folder->parent(), folder);
 }
 
@@ -664,9 +930,15 @@ void MainWindow::rememberSession() const
     if (!m_session || !m_rememberSession)
         return;
     QSettings settings;
-    settings.setValue("session/kind", m_session->game ? "game" : "archive");
+    std::error_code ec;
+    const bool folder = std::filesystem::is_directory(m_session->source, ec);
+    settings.setValue("session/kind", m_session->game ? "game" : folder ? "folder" : "archive");
     settings.setValue("session/game", m_session->game ? toQString(m_session->game->info().id) : QString());
     settings.setValue("session/path", toQString(m_session->source));
+    QStringList extras;
+    for (const auto& path : m_session->extraSources())
+        extras << toQString(path);
+    settings.setValue(extrasKey(m_session->game), extras);
 }
 
 bool MainWindow::reopenLastSession()
@@ -679,31 +951,25 @@ bool MainWindow::reopenLastSession()
     if (path.isEmpty() || !QFileInfo::exists(path))
         return false;
 
-    m_pendingSelect = settings.value("session/selection").toString();
-    m_pendingOpen = settings.value("session/previewOpen", true).toBool();
+    const Game* game = nullptr;
     if (kind == "game") {
-        const Game* game = m_games.find(settings.value("session/game").toString().toStdString());
+        game = m_games.find(settings.value("session/game").toString().toStdString());
         if (!game)
             return false;
-        openGame(*game, toPath(path));
-        return true;
+    } else if (kind != "archive" && kind != "folder") {
+        return false;
     }
-    if (kind == "archive") {
-        openArchive(toPath(path));
-        return true;
-    }
-    return false;
+    std::vector<std::filesystem::path> extras;
+    for (const QString& extra : settings.value(extrasKey(game)).toStringList())
+        extras.push_back(toPath(extra));
+    openSource(game, toPath(path), std::move(extras), settings.value("session/selection").toString());
+    return true;
 }
 
-void MainWindow::reloadSession(const QString& virtualPath)
+void MainWindow::reloadSession(const QString& location)
 {
-    if (!m_session)
-        return;
-    m_pendingSelect = virtualPath;
-    if (m_session->game)
-        openGame(*m_session->game, m_session->source);
-    else
-        openArchive(m_session->source);
+    if (m_session)
+        openSource(m_session->game, m_session->source, m_session->extraSources(), location);
 }
 
 // ---- Edit Mode & backups ----------------------------------------------------------------------
@@ -731,15 +997,10 @@ void MainWindow::setEditMode(bool on, bool confirm)
         statusBar()->showMessage(on ? tr("Edit Mode on — game files can be modified")
                                     : tr("Edit Mode off — game files are read-only"),
                                  5000);
+    for (PreviewWindow* w : previewWindows())
+        w->setEditMode(on);
     updateBackupBanner();
     updateActions();
-}
-
-const VfsNode* MainWindow::currentNode() const
-{
-    if (!m_session)
-        return nullptr;
-    return previewShowing() ? m_preview->node() : m_folderView->folder();
 }
 
 void MainWindow::updateBackupBanner()
@@ -750,19 +1011,20 @@ void MainWindow::updateBackupBanner()
         return m_editMode && !target.empty() && !hasBackup(*node) ? toQString(target.filename()) : QString();
     };
     m_folderView->banner()->setWarning(warningFor(m_folderView->folder()));
-    m_preview->setBackupWarning(warningFor(m_preview->node()));
+    for (PreviewWindow* w : previewWindows())
+        w->setBackupWarning(warningFor(w->node()));
 }
 
-void MainWindow::backupCurrent()
+void MainWindow::backupNode(const VfsNode* node)
 {
-    const VfsNode* node = currentNode();
-    if (!node || m_editWatcher->isRunning())
+    if (!node || !m_session || m_editWatcher->isRunning())
         return;
     const auto target = backupTarget(*node);
     if (target.empty() || hasBackup(*node))
         return;
-    m_preview->setBackupInProgress(true);
     m_folderView->banner()->setInProgress(true);
+    for (PreviewWindow* w : previewWindows())
+        w->setBackupInProgress(true);
     m_statusLabel->setText(tr("Backing up %1…").arg(toQString(target.filename())));
     m_progress->setRange(0, 0);
     m_progress->show();
@@ -775,29 +1037,34 @@ void MainWindow::backupCurrent()
 
 void MainWindow::replaceSelected()
 {
-    const auto nodes = selectedNodes();
-    if (nodes.size() != 1 || !Vfs::canReplace(*nodes.front()))
+    if (const auto nodes = selectedNodes(); nodes.size() == 1)
+        replaceWithDialog(nodes.front(), this);
+}
+
+void MainWindow::replaceWithDialog(const VfsNode* node, QWidget* dialogParent)
+{
+    if (!node || !m_editMode || !Vfs::canReplace(*node))
         return;
-    const VfsNode* node = nodes.front();
     const QString ext = toQString(extensionOf(node->name()));
     QSettings settings;
     const QString file = QFileDialog::getOpenFileName(
-        this, tr("Replace %1 with…").arg(toQString(node->name())), settings.value("paths/lastReplaceDir").toString(),
+        dialogParent, tr("Replace %1 with…").arg(toQString(node->name())), settings.value("paths/lastReplaceDir").toString(),
         tr("%1 files (*.%2)").arg(ext.toUpper(), ext));
     if (file.isEmpty())
         return;
     settings.setValue("paths/lastReplaceDir", QFileInfo(file).absolutePath());
-    replaceNode(node, file);
+    replaceNode(node, file, dialogParent);
 }
 
-void MainWindow::replaceNode(const VfsNode* node, const QString& file)
+void MainWindow::replaceNode(const VfsNode* node, const QString& file, QWidget* dialogParent)
 {
     if (!m_session || !node || !m_editMode || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
         return;
+    QWidget* parent = dialogParent ? dialogParent : this; // dialogs appear over the window that asked
 
     auto plan = planReplace(*m_session, *node, file);
     if (!plan) {
-        QMessageBox::warning(this, tr("Replace"), toQString(plan.error().message));
+        QMessageBox::warning(parent, tr("Replace"), toQString(plan.error().message));
         return;
     }
 
@@ -814,7 +1081,7 @@ void MainWindow::replaceNode(const VfsNode* node, const QString& file)
     // No automatic backups: if there isn't one, say so and offer to make it.
     const auto target = Vfs::editTarget(*node);
     const bool backedUp = hasBackup(*node);
-    QMessageBox box(QMessageBox::Question, tr("Replace"), QString(), QMessageBox::Cancel, this);
+    QMessageBox box(QMessageBox::Question, tr("Replace"), QString(), QMessageBox::Cancel, parent);
     QPushButton* replace = nullptr;
     QPushButton* backupAndReplace = nullptr;
     if (backedUp) {
@@ -838,8 +1105,8 @@ void MainWindow::replaceNode(const VfsNode* node, const QString& file)
     else if (box.clickedButton() != replace)
         return;
 
-    m_pendingSelect = toQString(node->virtualPath());
-    m_pendingOpen = previewShowing(); // come back to the same view after the reload
+    // After the reload: select it again (open preview windows follow on their own).
+    m_pendingSelect = locationOf(node);
     m_statusLabel->setText(tr("Replacing %1…").arg(toQString(node->name())));
     m_progress->setRange(0, 0);
     m_progress->show();
@@ -865,12 +1132,10 @@ void MainWindow::restoreOriginal()
 
     // Close the session first so no open handle blocks overwriting the file;
     // remember what to reopen once the restore finishes.
-    m_reopen = {m_session->game, m_session->source};
-    const QString reselect = toQString(node->virtualPath());
-    const bool reopenPreview = previewShowing();
+    m_reopen = {m_session->game, m_session->source, m_session->extraSources()};
+    const QString reselect = locationOf(node);
     setSession(nullptr);
     m_pendingSelect = reselect;
-    m_pendingOpen = reopenPreview;
 
     m_statusLabel->setText(tr("Restoring %1…").arg(name));
     m_progress->setRange(0, 0);
@@ -887,8 +1152,9 @@ void MainWindow::onEditFinished()
     const EditResult result = m_editWatcher->result();
 
     if (result.kind == EditResult::Kind::Backup) { // nothing changed in the archive: no reload
-        m_preview->setBackupInProgress(false);
         m_folderView->banner()->setInProgress(false);
+        for (PreviewWindow* w : previewWindows())
+            w->setBackupInProgress(false);
         if (!result.error.isEmpty())
             QMessageBox::warning(this, tr("Back Up"), result.error);
         else
@@ -903,11 +1169,8 @@ void MainWindow::onEditFinished()
         m_statusLabel->setText(tr("Edit failed"));
     }
     if (m_reopen) { // a restore closed the session: open it again
-        const auto [game, source] = *std::exchange(m_reopen, std::nullopt);
-        if (game)
-            openGame(*game, source);
-        else
-            openArchive(source);
+        const auto [game, source, extras] = *std::exchange(m_reopen, std::nullopt);
+        openSource(game, source, extras, std::exchange(m_pendingSelect, QString()));
     } else if (result.error.isEmpty()) {
         reloadSession(m_pendingSelect); // show the new contents
     }
@@ -919,40 +1182,52 @@ void MainWindow::onEditFinished()
     updateActions();
 }
 
-const VfsNode* MainWindow::dropTarget(const QPoint& pos, const QMimeData* mime, QString* reason) const
+const VfsNode* MainWindow::nodeAt(const QAbstractItemView* view, const QPoint& pos) const
+{
+    if (view == m_tree)
+        return VfsModel::nodeFromIndex(m_treeFilter->mapToSource(m_tree->indexAt(pos)));
+    return m_folderView->nodeAt(pos);
+}
+
+const VfsNode* MainWindow::dropTarget(const QAbstractItemView* view, const QPoint& pos, const QMimeData* mime,
+                                      QString* reason) const
 {
     if (!m_session || !mime || !mime->hasUrls() || mime->urls().size() != 1)
         return nullptr;
     const QString file = mime->urls().front().toLocalFile();
     if (!QFileInfo(file).isFile())
         return nullptr;
-    const VfsNode* node = m_folderView->nodeAt(pos);
+    const VfsNode* node = nodeAt(view, pos);
     if (!node || !node->isFile())
         return nullptr;
-    if (!m_editMode) {
-        *reason = tr("Turn on Edit Mode (Ctrl+M) to replace files");
-        return nullptr;
-    }
-    if (!Vfs::canReplace(*node)) {
-        *reason = tr("%1 can't be replaced").arg(toQString(node->name()));
-        return nullptr;
-    }
+    *reason = replaceRefusal(node, file);
+    return reason->isEmpty() ? node : nullptr;
+}
+
+QString MainWindow::replaceRefusal(const VfsNode* node, const QString& file) const
+{
+    if (!m_session || !node || !node->isFile())
+        return tr("Nothing to replace");
+    if (!m_editMode)
+        return tr("Turn on Edit Mode (Ctrl+M) to replace files");
+    if (!Vfs::canReplace(*node))
+        return tr("%1 can't be replaced").arg(toQString(node->name()));
     const QString targetExt = toQString(extensionOf(node->name()));
-    if (QFileInfo(file).suffix().compare(targetExt, Qt::CaseInsensitive) != 0) {
-        *reason = tr("Can't drop a .%1 file onto %2 (needs .%3)")
-                      .arg(QFileInfo(file).suffix(), toQString(node->name()), targetExt);
-        return nullptr;
-    }
-    return node;
+    if (QFileInfo(file).suffix().compare(targetExt, Qt::CaseInsensitive) != 0)
+        return tr("Can't drop a .%1 file onto %2 (needs .%3)")
+            .arg(QFileInfo(file).suffix(), toQString(node->name()), targetExt);
+    return {};
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
-    QTreeView* list = m_folderView->view();
-    if (watched != list->viewport())
+    QTreeView* view = watched == m_folderView->view()->viewport() ? m_folderView->view()
+                      : watched == m_tree->viewport()             ? m_tree
+                                                                  : nullptr;
+    if (!view)
         return QMainWindow::eventFilter(watched, event);
 
-    // Over the folder list, a single dropped file either replaces the item under the
+    // Over the list or tree, a single dropped file either replaces the item under the
     // cursor (matching type), is refused with a reason (other type), or —
     // over empty space / folders — opens like a drop anywhere else.
     const auto isFileDrag = [](const QMimeData* mime) {
@@ -967,10 +1242,10 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
             return false;
         QString reason;
         const QPoint pos = drag->position().toPoint();
-        if (const VfsNode* node = dropTarget(pos, drag->mimeData(), &reason)) {
+        if (const VfsNode* node = dropTarget(view, pos, drag->mimeData(), &reason)) {
             drag->acceptProposedAction();
-            // Highlight the row that would be replaced (selection only, no preview reload).
-            list->selectionModel()->select(list->indexAt(pos),
+            // Highlight the row that would be replaced (selection only, no navigation).
+            view->selectionModel()->select(view->indexAt(pos),
                                            QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
             statusBar()->showMessage(tr("Drop to replace %1").arg(toQString(node->name())));
         } else if (!reason.isEmpty()) {
@@ -993,7 +1268,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
         statusBar()->clearMessage();
         QString reason;
         const QString file = drop->mimeData()->urls().front().toLocalFile();
-        const VfsNode* node = dropTarget(drop->position().toPoint(), drop->mimeData(), &reason);
+        const VfsNode* node = dropTarget(view, drop->position().toPoint(), drop->mimeData(), &reason);
         drop->acceptProposedAction();
         // Act after the drop completes so Explorer isn't blocked by our dialogs.
         if (node)
@@ -1015,10 +1290,8 @@ std::vector<const VfsNode*> MainWindow::selectedNodes() const
 {
     if (!m_session)
         return {};
-    // The previewed file; else what's selected in the list (unless the tree
-    // has focus); else the folder selected in the tree.
-    if (previewShowing())
-        return m_preview->node() ? std::vector{m_preview->node()} : std::vector<const VfsNode*>{};
+    // What's selected in the list (unless the tree has focus); else the
+    // folder selected in the tree.
     if (!m_tree->hasFocus())
         if (auto nodes = m_folderView->selectedNodes(); !nodes.empty())
             return nodes;
@@ -1037,8 +1310,10 @@ void MainWindow::updateActions()
     const auto nodes = hasSession ? selectedNodes() : std::vector<const VfsNode*>{};
     const VfsNode* single = nodes.size() == 1 ? nodes.front() : nullptr;
 
-    m_openGameAction->setEnabled(!busy);
-    m_openArchiveAction->setEnabled(!busy);
+    const bool opening = busy || m_mountWatcher->isRunning();
+    m_openGameAction->setEnabled(!opening);
+    m_openArchiveAction->setEnabled(!opening);
+    m_openFolderAction->setEnabled(!opening);
     m_extractAction->setEnabled(hasSession && !nodes.empty() && !extracting);
     m_extractAllAction->setEnabled(hasSession && !extracting);
     m_editModeAction->setEnabled(!editing);
@@ -1049,7 +1324,7 @@ void MainWindow::updateActions()
     m_openAction->setEnabled(single != nullptr);
     m_propertiesAction->setEnabled(single != nullptr);
     const VfsNode* folder = m_folderView->folder();
-    m_backAction->setEnabled(previewShowing() || (folder && folder->parent()));
+    m_backAction->setEnabled(folder && !m_model->isRoot(folder));
 }
 
 void MainWindow::showTreeContextMenu(const QPoint& pos)
@@ -1067,6 +1342,14 @@ void MainWindow::showTreeContextMenu(const QPoint& pos)
     menu.addAction(m_revealAction);
     menu.addSeparator();
     menu.addAction(m_propertiesAction);
+    // Archives and folders opened alongside the game can be closed again.
+    const VfsNode* node = treeNode();
+    if (m_session && node && m_model->isRoot(node) && node != &m_session->vfs.root()) {
+        menu.addSeparator();
+        QAction* close = menu.addAction(icons::theme(QIcon::ThemeIcon::WindowClose, QStyle::SP_DialogCloseButton),
+                                        tr("&Close %1").arg(m_model->data(m_model->indexForNode(node)).toString()));
+        connect(close, &QAction::triggered, this, [this, node] { closeMount(node); });
+    }
     menu.exec(m_tree->viewport()->mapToGlobal(pos));
 }
 
@@ -1100,14 +1383,24 @@ void MainWindow::showListContextMenu(const QPoint& globalPos)
 
 void MainWindow::extract(bool everything)
 {
+    if (!m_session)
+        return;
+    if (everything)
+        extractNodes({&m_session->vfs.root()});
+    else
+        extractNodes(selectedNodes());
+}
+
+void MainWindow::extractNodes(const std::vector<const VfsNode*>& nodes)
+{
     if (!m_session || m_extractWatcher->isRunning())
         return;
     std::vector<ExtractItem> items;
-    if (everything) {
+    if (nodes.size() == 1 && nodes.front() == &m_session->vfs.root()) { // everything, laid out as in the game
         for (const VfsNode* file : Vfs::collectFiles(m_session->vfs.root()))
             items.push_back({file, file->virtualPath()});
     } else {
-        items = planExtraction(selectedNodes());
+        items = planExtraction(nodes);
     }
     if (items.empty())
         return;
@@ -1165,10 +1458,13 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // Reopened at next start-up (see reopenLastSession): the previewed file,
     // or the open folder.
     if (m_rememberSession) {
-        const VfsNode* current = currentNode();
-        settings.setValue("session/selection", current ? toQString(current->virtualPath()) : QString());
-        settings.setValue("session/previewOpen", previewShowing());
+        const auto selected = m_folderView->selectedNodes();
+        const VfsNode* current = selected.size() == 1 ? selected.front() : m_folderView->folder();
+        settings.setValue("session/selection", locationOf(current));
+        settings.remove("session/previewOpen");
     }
+    for (PreviewWindow* w : previewWindows())
+        w->close();
     settings.setValue("window/geometry", saveGeometry());
     settings.setValue("window/state", saveState());
     settings.setValue("window/listHeader", m_folderView->saveHeaderState());

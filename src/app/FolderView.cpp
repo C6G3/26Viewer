@@ -62,7 +62,7 @@ FolderView::FolderView(VfsModel* model, QWidget* parent)
     m_up->setAutoRaise(true);
     m_up->setToolTip(tr("Up one level  (Backspace)"));
     connect(m_up, &QToolButton::clicked, this, [this] {
-        if (m_folder && m_folder->parent())
+        if (m_folder && !m_model->isRoot(m_folder))
             emit navigateRequested(m_folder->parent());
     });
 
@@ -197,7 +197,7 @@ void FolderView::updateRoot()
 void FolderView::updateHeader()
 {
     m_crumbs.clear();
-    m_up->setEnabled(m_folder && m_folder->parent());
+    m_up->setEnabled(m_folder && !m_model->isRoot(m_folder));
     if (!m_folder) {
         m_title->setText(m_placeholderTitle);
         m_path->clear();
@@ -209,7 +209,7 @@ void FolderView::updateHeader()
     };
     m_title->setText(label(m_folder));
 
-    for (const VfsNode* n = m_folder; n; n = n->parent())
+    for (const VfsNode* n = m_folder; n; n = m_model->isRoot(n) ? nullptr : n->parent())
         m_crumbs.push_back(n);
     std::ranges::reverse(m_crumbs);
     QStringList parts;

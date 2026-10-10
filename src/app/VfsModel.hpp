@@ -7,23 +7,41 @@
 #include <QIcon>
 #include <QSortFilterProxyModel>
 
+#include <vector>
+
 namespace viewer::app {
 
-/// Exposes a Vfs tree to Qt views. Each QModelIndex stores a VfsNode* in its
-/// internal pointer; the tree is immutable while the model is attached.
-/// The root itself is the single top-level row (shown as the game's name).
+/// Exposes Vfs trees to Qt views. Each QModelIndex stores a VfsNode* in its
+/// internal pointer; the trees are immutable while attached.
+/// The top-level rows are the session's mounts: the game (or archive/folder)
+/// first, then anything opened alongside it.
 class VfsModel : public QAbstractItemModel {
     Q_OBJECT
 public:
     enum Column { Name, Type, Size, Packed, Modified, ColumnCount };
     enum Role { NodeRole = Qt::UserRole + 1, SortRole };
 
+    /// A top-level row.
+    struct Root {
+        const VfsNode* node = nullptr;
+        QString label;
+        QString tooltip;
+        QIcon icon;
+    };
+
     explicit VfsModel(QObject* parent = nullptr);
 
-    /// Attaches a tree (or detaches with nullptrs). Both must outlive the model's use.
-    /// `rootLabel` / `rootIcon` are shown for the root row.
-    void setSource(const VfsNode* root, const ContentRegistry* content, const QString& rootLabel = {},
-                   const QIcon& rootIcon = {});
+    /// Replaces all top-level rows (empty to detach). The nodes and `content`
+    /// must outlive their use by the model.
+    void setRoots(std::vector<Root> roots, const ContentRegistry* content);
+    void appendRoot(Root root);
+    void removeRoot(int row);
+    [[nodiscard]] int rootCount() const noexcept { return static_cast<int>(m_roots.size()); }
+    /// Row of a top-level node, or -1.
+    [[nodiscard]] int rootRow(const VfsNode* node) const;
+    [[nodiscard]] bool isRoot(const VfsNode* node) const { return rootRow(node) >= 0; }
+    /// The top-level node `node` lives under (null if it isn't shown).
+    [[nodiscard]] const VfsNode* topOf(const VfsNode* node) const;
 
     [[nodiscard]] static const VfsNode* nodeFromIndex(const QModelIndex& index);
     [[nodiscard]] QModelIndex indexForNode(const VfsNode* node, int column = Name) const;
@@ -39,10 +57,8 @@ public:
     QMimeData* mimeData(const QModelIndexList& indexes) const override;
 
 private:
-    const VfsNode* m_root = nullptr;
+    std::vector<Root> m_roots;
     const ContentRegistry* m_content = nullptr;
-    QString m_rootLabel;
-    QIcon m_rootIcon;
 };
 
 /// Sorting (folders first) and recursive name filtering.

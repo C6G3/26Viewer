@@ -12,7 +12,6 @@ class QPlainTextEdit;
 class QPushButton;
 class QStackedWidget;
 class QTabWidget;
-class QToolButton;
 class QTreeWidget;
 
 namespace viewer::app {
@@ -22,8 +21,7 @@ class HexView;
 class ImageView;
 struct PreviewResult;
 
-/// Opened by double-clicking a file in the folder list: Preview / Structure /
-/// Hex / Properties, with a Back button to return to the list.
+/// The contents of a PreviewWindow: Preview / Structure / Hex / Properties.
 ///
 /// Selecting a file starts a background job that reads, decompresses and
 /// decodes it; stale results (the user already clicked something else) are
@@ -43,9 +41,6 @@ public:
     void showProperties(const VfsNode* node);
     [[nodiscard]] const VfsNode* node() const noexcept { return m_node; }
 
-    /// Names the folder the Back button returns to; empty hides the button.
-    void setBackTarget(const QString& folderName);
-
     /// Shows the red "not backed up" banner for `fileName`; an empty name hides it.
     void setBackupWarning(const QString& fileName);
     /// Disables the banner's button while a backup is running.
@@ -56,8 +51,6 @@ signals:
     void previewReady();
     /// The user clicked "Back Up Now" on the banner.
     void backupRequested();
-    /// The user clicked the Back button.
-    void backRequested();
 
 private:
     enum Tab { PreviewTab, StructureTab, HexTab, PropertiesTab };
@@ -74,7 +67,6 @@ private:
     int m_forcedTab = -1;            ///< One-off tab for the current node (showProperties).
     QFutureWatcher<std::shared_ptr<PreviewResult>>* m_watcher;
 
-    QToolButton* m_back;
     QLabel* m_title;
     QLabel* m_subtitle;
     BackupBanner* m_banner;

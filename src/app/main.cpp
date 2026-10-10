@@ -1,6 +1,7 @@
 // 26Viewer — Qt desktop front-end.
 
 #include "MainWindow.hpp"
+#include "PreviewWindow.hpp"
 #include "Theme.hpp"
 #include "preview/PreviewPane.hpp"
 
@@ -10,6 +11,8 @@
 #include <QCommandLineParser>
 #include <QSettings>
 #include <QTimer>
+
+#include <memory>
 
 namespace {
 
@@ -57,27 +60,34 @@ Options parseArguments(const QApplication& app)
     return o;
 }
 
-/// --screenshot: once loaded (and the selection previewed), grab and quit.
+/// --screenshot: once loaded, grab the main window — or, when --select names
+/// a file, its preview window once the file has loaded — and quit.
 void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
 {
-    auto capture = [&window, file = o.screenshot] {
-        QTimer::singleShot(400, &window, [&window, file] {
-            window.grab().save(file);
+    auto capture = [file = o.screenshot](QWidget* target) {
+        QTimer::singleShot(400, target, [target, file] {
+            target->grab().save(file);
             QApplication::quit();
         });
     };
     QObject::connect(&window, &viewer::app::MainWindow::sessionChanged, &window, [&window, o, capture] {
-        // A folder (or nothing) is shown at once; a file once its preview has loaded.
-        if (o.select.isEmpty() || !window.selectPath(o.select) || !window.previewShowing()) {
-            capture();
-            return;
-        }
-        auto* pane = window.previewPane();
-        QObject::connect(pane, &viewer::app::PreviewPane::previewReady, &window, [pane, o, capture] {
-            if (o.tab >= 0)
-                pane->setCurrentTab(o.tab);
-            capture();
-        }, Qt::SingleShotConnection);
+        auto opened = std::make_shared<bool>(false);
+        QObject::connect(&window, &viewer::app::MainWindow::previewOpened, &window,
+                         [o, capture, opened](viewer::app::PreviewWindow* preview) {
+                             *opened = true;
+                             preview->resize(1100, 800);
+                             auto* pane = preview->pane();
+                             QObject::connect(pane, &viewer::app::PreviewPane::previewReady, preview,
+                                              [pane, preview, o, capture] {
+                                                  if (o.tab >= 0)
+                                                      pane->setCurrentTab(o.tab);
+                                                  capture(preview);
+                                              },
+                                              Qt::SingleShotConnection);
+                         },
+                         Qt::SingleShotConnection);
+        if (o.select.isEmpty() || !window.selectPath(o.select) || !*opened)
+            capture(&window); // nothing selected, or a folder: the main window is the picture
     });
 }
 
@@ -114,6 +124,7 @@ int main(int argc, char* argv[])
 
     if (!options.screenshot.isEmpty()) {
         window.setRememberSession(false);
+        window.setOffscreen(true);
         window.setAttribute(Qt::WA_DontShowOnScreen);
         window.resize(1400, 860);
         scheduleScreenshot(window, options);

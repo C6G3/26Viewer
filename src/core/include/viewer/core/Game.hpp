@@ -14,6 +14,7 @@ struct GameInfo {
     std::string developer;   ///< "Bizarre Creations".
     int year = 0;
     std::string description; ///< One line shown in the game picker.
+    std::string executable;  ///< Main executable, relative to the install ("Blur.exe"); its icon marks the game.
 };
 
 /// A game module: knows how to recognise an install and which formats,

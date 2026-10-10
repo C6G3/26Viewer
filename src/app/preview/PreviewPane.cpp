@@ -1,7 +1,6 @@
 #include "PreviewPane.hpp"
 
 #include "../BackupBanner.hpp"
-#include "../Icons.hpp"
 #include "../QtConvert.hpp"
 #include "HexView.hpp"
 #include "ImageView.hpp"
@@ -18,7 +17,6 @@
 #include <QStringDecoder>
 #include <QTabBar>
 #include <QTabWidget>
-#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
@@ -152,7 +150,7 @@ void addStructureItems(QTreeWidgetItem* parent, QTreeWidget* tree, const Structu
 
 PreviewPane::PreviewPane(QWidget* parent)
     : QWidget(parent), m_watcher(new QFutureWatcher<std::shared_ptr<PreviewResult>>(this)),
-      m_back(new QToolButton(this)), m_title(new QLabel(this)), m_subtitle(new QLabel(this)),
+      m_title(new QLabel(this)), m_subtitle(new QLabel(this)),
       m_banner(new BackupBanner(this)), m_tabs(new QTabWidget(this)),
       m_previewStack(new QStackedWidget(this)), m_message(new QLabel(this)), m_image(new ImageView(this)),
       m_text(new QPlainTextEdit(this)), m_structure(new QTreeWidget(this)), m_hex(new HexView(this)),
@@ -172,6 +170,7 @@ PreviewPane::PreviewPane(QWidget* parent)
     m_message->setWordWrap(true);
     m_message->setForegroundRole(QPalette::PlaceholderText);
     m_text->setReadOnly(true);
+    m_text->setAcceptDrops(false); // dropped files go to the window (replace)
     m_text->setLineWrapMode(QPlainTextEdit::NoWrap);
     QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     mono.setFamilies({QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"), mono.family()});
@@ -209,25 +208,11 @@ PreviewPane::PreviewPane(QWidget* parent)
 
     connect(m_banner, &BackupBanner::backupRequested, this, &PreviewPane::backupRequested);
 
-    m_back->setIcon(icons::theme(QIcon::ThemeIcon::GoPrevious, QStyle::SP_ArrowBack));
-    m_back->setAutoRaise(true);
-    m_back->setIconSize(QSize(20, 20));
-    m_back->hide();
-    connect(m_back, &QToolButton::clicked, this, &PreviewPane::backRequested);
-
-    auto* titles = new QVBoxLayout;
-    titles->setSpacing(2);
-    titles->addWidget(m_title);
-    titles->addWidget(m_subtitle);
-    auto* titleRow = new QHBoxLayout;
-    titleRow->setSpacing(6);
-    titleRow->addWidget(m_back, 0, Qt::AlignTop);
-    titleRow->addLayout(titles, 1);
-
     auto* header = new QVBoxLayout;
-    header->setContentsMargins(8, 10, 12, 6);
+    header->setContentsMargins(12, 10, 12, 6);
     header->setSpacing(2);
-    header->addLayout(titleRow);
+    header->addWidget(m_title);
+    header->addWidget(m_subtitle);
     header->addSpacing(6);
     header->addWidget(m_banner);
 
@@ -360,12 +345,6 @@ void PreviewPane::setBackupWarning(const QString& fileName)
 void PreviewPane::setBackupInProgress(bool running)
 {
     m_banner->setInProgress(running);
-}
-
-void PreviewPane::setBackTarget(const QString& folderName)
-{
-    m_back->setVisible(!folderName.isEmpty());
-    m_back->setToolTip(tr("Back to %1  (Backspace)").arg(folderName));
 }
 
 void PreviewPane::showProperties(const VfsNode* node)

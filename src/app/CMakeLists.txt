@@ -20,6 +20,8 @@ qt_add_executable(viewer_app WIN32
     Icons.hpp
     MainWindow.cpp
     MainWindow.hpp
+    PreviewWindow.cpp
+    PreviewWindow.hpp
     QtConvert.hpp
     Session.cpp
     Session.hpp

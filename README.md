@@ -18,11 +18,19 @@ system, image decoders, the UI — is shared by every future game module.
 - **Game picker** at start-up: choose a game, browse to its folder, the app
   checks it really is that game's install and remembers it.
 - **Explorer-style browsing** (like OpenIV / RPF Explorer): the tree on the left
-  shows the install folder with every archive openable like a folder; the list on
-  the right shows what's inside the selected folder or archive. **Double-click**
-  (or `Enter`) enters a folder or opens a file's preview; **Backspace** goes back.
-  The path bar above the list is clickable, and **search** (`Ctrl+F`) finds files
-  anywhere below the open folder.
+  shows the install (with the game's own icon) and every archive opens like a
+  folder; the list on the right shows what's inside the selected folder or
+  archive. **Double-click** (or `Enter`) enters a folder or opens a file;
+  **Backspace** goes up. The path bar above the list is clickable, and **search**
+  (`Ctrl+F`) finds files anywhere below the open folder. *View ▸ Show Files in
+  Tree* switches the tree between everything and folders/archives only.
+- **Preview windows**: each file opens in its own window (several at once, any
+  monitor) with Preview / Structure / Hex / Properties tabs and a toolbar for
+  per-file tools (Show in List, Extract, Replace — or drop a file on the window).
+- **Open alongside the game**: *Open Archive…* and *Open Folder…* add archives of
+  that game, or any folder (a mod workspace, say), as extra entries at the top
+  of the tree. Each game remembers its extras for next time; right-click one ▸
+  *Close* to remove it.
 - **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`), text,
   a fast hex view, a **Structure** tab for chunked formats, and a **Properties**
   tab (compression, offsets, hashes…).

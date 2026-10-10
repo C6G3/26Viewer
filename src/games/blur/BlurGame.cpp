@@ -19,6 +19,7 @@ public:
             .developer = "Bizarre Creations",
             .year = 2010,
             .description = "Arcade racer — browses cache/*.pak packages and loose level data.",
+            .executable = "Blur.exe",
         };
         return kInfo;
     }
