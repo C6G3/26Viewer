@@ -94,6 +94,20 @@ public:
         return data.size() >= 4 && loadScalar<std::uint32_t>(data, 0) == 0x20534444; // "DDS "
     }
     Result<Image> decode(ByteSpan data) const override { return image::decodeDds(data); }
+    Result<image::Surfaces> surfaces(ByteSpan data) const override { return image::readDds(data); }
+    bool canRebuild() const noexcept override { return true; }
+    std::vector<image::PixelFormat> importFormats(ByteSpan data) const override
+    {
+        using image::PixelFormat;
+        std::vector<PixelFormat> formats{PixelFormat::BC1, PixelFormat::BC2, PixelFormat::BC3, PixelFormat::A8R8G8B8};
+        if (auto s = image::readDds(data); s && image::canEncode(s->format) && !std::ranges::contains(formats, s->format))
+            formats.push_back(s->format);
+        return formats;
+    }
+    Result<ByteBuffer> rebuild(ByteSpan, const image::Surfaces& surfaces) const override
+    {
+        return image::writeDds(surfaces);
+    }
 };
 
 } // namespace

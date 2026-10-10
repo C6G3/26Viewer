@@ -1,9 +1,11 @@
 #include "MainWindow.hpp"
 
 #include "BackupBanner.hpp"
+#include "Exporter.hpp"
 #include "FolderView.hpp"
 #include "GamePickerDialog.hpp"
 #include "Icons.hpp"
+#include "ImportExportDialogs.hpp"
 #include "QtConvert.hpp"
 #include "Theme.hpp"
 #include "VfsModel.hpp"
@@ -20,6 +22,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QDragEnterEvent>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
@@ -32,6 +35,7 @@
 #include <QMimeData>
 #include <QProcess>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QSettings>
 #include <QSplitter>
@@ -54,6 +58,25 @@ namespace {
 QString appName()
 {
     return QApplication::applicationDisplayName();
+}
+
+/// Runs `job` on a worker thread while a small "please wait" dialog shows
+/// (for re-encoding sounds and compressing textures, which take a moment).
+template <typename T>
+T runBusy(QWidget* parent, const QString& text, std::function<T()> job)
+{
+    QProgressDialog dialog(text, QString(), 0, 0, parent);
+    dialog.setWindowTitle(QApplication::applicationDisplayName());
+    dialog.setWindowModality(Qt::WindowModal);
+    dialog.setCancelButton(nullptr);
+    dialog.setMinimumDuration(400);
+    QFutureWatcher<T> watcher;
+    QEventLoop loop;
+    QObject::connect(&watcher, &QFutureWatcher<T>::finished, &loop, &QEventLoop::quit);
+    watcher.setFuture(QtConcurrent::run(std::move(job)));
+    if (!watcher.isFinished())
+        loop.exec();
+    return watcher.result();
 }
 
 QString sizeText(std::uint64_t bytes)
@@ -134,7 +157,9 @@ MainWindow::MainWindow(const GameRegistry& games, ThemeManager& theme, QWidget* 
     connect(m_extractWatcher, &QFutureWatcher<ExtractSummary>::progressValueChanged, m_progress,
             &QProgressBar::setValue);
     connect(m_extractWatcher, &QFutureWatcher<ExtractSummary>::progressTextChanged, this,
-            [this](const QString& text) { m_statusLabel->setText(tr("Extracting %1…").arg(text)); });
+            [this](const QString& text) {
+                m_statusLabel->setText((m_exporting ? tr("Exporting %1…") : tr("Extracting %1…")).arg(text));
+            });
     connect(m_editWatcher, &QFutureWatcher<EditResult>::finished, this, &MainWindow::onEditFinished);
     // Which pane has focus decides what "selected" means (see selectedNodes).
     connect(qApp, &QApplication::focusChanged, this, &MainWindow::updateActions);
@@ -188,6 +213,21 @@ void MainWindow::buildActions()
     m_extractAllAction = new QAction(icons::theme(TI::DocumentSave, QStyle::SP_DialogSaveButton), tr("Extract A&ll…"), this);
     m_extractAllAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     connect(m_extractAllAction, &QAction::triggered, this, [this] { extract(true); });
+
+    m_exportAction = new QAction(icons::theme(TI::DocumentSend, QStyle::SP_DialogSaveButton), tr("E&xport…"), this);
+    m_exportAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_E));
+    m_exportAction->setStatusTip(tr("Save the selection converted for other programs: sound banks → folders of "
+                                    ".wav, models → .obj, textures → .png / .dds / .jpg / .bmp"));
+    connect(m_exportAction, &QAction::triggered, this, [this] { exportNodes(selectedNodes()); });
+
+    m_importAction = new QAction(icons::theme(TI::DocumentOpen, QStyle::SP_DialogOpenButton), tr("&Import…"), this);
+    m_importAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    m_importAction->setStatusTip(tr("Convert your files back into the selected one: a folder of .wav files into a "
+                                    "sound bank, a picture into a texture. Needs Edit Mode."));
+    connect(m_importAction, &QAction::triggered, this, [this] {
+        if (const auto nodes = selectedNodes(); nodes.size() == 1)
+            importNode(nodes.front());
+    });
 
     m_copyPathAction = new QAction(icons::theme(TI::EditCopy, QStyle::SP_FileIcon), tr("&Copy Path"), this);
     m_copyPathAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
@@ -272,6 +312,7 @@ void MainWindow::buildActions()
     file->addSeparator();
     file->addAction(m_extractAction);
     file->addAction(m_extractAllAction);
+    file->addAction(m_exportAction);
     file->addSeparator();
     file->addAction(m_reopenAction);
     file->addSeparator();
@@ -283,6 +324,7 @@ void MainWindow::buildActions()
     edit->addAction(m_editModeAction);
     edit->addSeparator();
     edit->addAction(m_replaceAction);
+    edit->addAction(m_importAction);
     edit->addAction(m_editTextAction);
     edit->addAction(m_restoreAction);
     edit->addSeparator();
@@ -374,8 +416,10 @@ void MainWindow::buildUi()
     toolbar->addSeparator();
     toolbar->addAction(m_extractAction);
     toolbar->addAction(m_extractAllAction);
+    toolbar->addAction(m_exportAction);
     toolbar->addSeparator();
     toolbar->addAction(m_replaceAction);
+    toolbar->addAction(m_importAction);
     auto* spacer = new QWidget(toolbar);
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     toolbar->addWidget(spacer);
@@ -910,6 +954,8 @@ PreviewWindow* MainWindow::openPreview(const VfsNode* node, bool properties)
         w->setAttribute(Qt::WA_DontShowOnScreen);
 
     w->setSession(m_session);
+    w->setImportCheck(
+        [this](const VfsNode* n) { return m_session && n && importKind(*m_session, *n) != ImportKind::None; });
     w->setEditMode(m_editMode);
     w->showNode(node, properties);
     w->setLocation(locationOf(node));
@@ -932,6 +978,12 @@ PreviewWindow* MainWindow::openPreview(const VfsNode* node, bool properties)
     });
     connect(w, &PreviewWindow::backupRequested, this, [this, w] { backupNode(w->node()); });
     connect(w, &PreviewWindow::editRequested, this, [this, w] { openTextEditor(w->node()); });
+    connect(w, &PreviewWindow::exportRequested, this, [this, w] {
+        if (const VfsNode* n = w->node())
+            exportNodes({n}, w);
+    });
+    connect(w, &PreviewWindow::importRequested, this, [this, w] { importNode(w->node(), w); });
+    connect(w, &PreviewWindow::replaceSoundRequested, this, [this, w](int index) { replaceSound(w, index); });
 
     updateBackupBanner();
     w->show();
@@ -1201,6 +1253,11 @@ bool MainWindow::confirmAndReplace(ReplacePlan plan, bool edited, QWidget* dialo
     text += tr("<br><br>Size: %1 → %2")
                 .arg(locale.formattedDataSize(static_cast<qint64>(node->size())),
                      locale.formattedDataSize(static_cast<qint64>(plan.data.size())));
+    if (!plan.notes.isEmpty()) {
+        text += QStringLiteral("<br>");
+        for (const QString& note : plan.notes)
+            text += QStringLiteral("<br>• ") + note.toHtmlEscaped();
+    }
     if (!plan.warning.isEmpty())
         text += QStringLiteral("<br><br>⚠ ") + plan.warning.toHtmlEscaped();
 
@@ -1448,6 +1505,9 @@ void MainWindow::updateActions()
     m_openFolderAction->setEnabled(!opening);
     m_extractAction->setEnabled(hasSession && !nodes.empty() && !extracting);
     m_extractAllAction->setEnabled(hasSession && !extracting);
+    m_exportAction->setEnabled(hasSession && !nodes.empty() && !extracting);
+    // Only looked up in Edit Mode: it reads the start of the file.
+    m_importAction->setEnabled(m_editMode && !busy && single && importKind(*m_session, *single) != ImportKind::None);
     m_editModeAction->setEnabled(!editing);
     m_replaceAction->setEnabled(m_editMode && !busy && single && Vfs::canReplace(*single));
     m_restoreAction->setEnabled(m_editMode && !busy && single && hasBackup(*single));
@@ -1468,6 +1528,7 @@ void MainWindow::showTreeContextMenu(const QPoint& pos)
     updateActions();
     QMenu menu(this);
     menu.addAction(m_extractAction);
+    menu.addAction(m_exportAction);
     if (m_restoreAction->isEnabled())
         menu.addAction(m_restoreAction);
     menu.addSeparator();
@@ -1505,7 +1566,11 @@ void MainWindow::showListContextMenu(const QPoint& globalPos)
         menu.addAction(m_editTextAction);
     }
     menu.addAction(m_extractAction);
+    menu.addAction(m_exportAction);
+    menu.addSeparator();
     menu.addAction(m_replaceAction);
+    if (m_importAction->isEnabled())
+        menu.addAction(m_importAction);
     if (m_restoreAction->isEnabled())
         menu.addAction(m_restoreAction);
     menu.addSeparator();
@@ -1551,6 +1616,7 @@ void MainWindow::extractNodes(const std::vector<const VfsNode*>& nodes)
     settings.setValue("paths/lastExtractDir", dir);
 
     m_extractTarget = dir;
+    m_exporting = false;
     m_progress->setRange(0, static_cast<int>(items.size()));
     m_progress->setValue(0);
     m_progress->show();
@@ -1565,22 +1631,214 @@ void MainWindow::onExtractFinished()
     m_cancel->hide();
     updateActions();
     if (m_extractWatcher->future().resultCount() == 0) {
-        m_statusLabel->setText(tr("Extraction cancelled"));
+        m_statusLabel->setText(m_exporting ? tr("Export cancelled") : tr("Extraction cancelled"));
         return;
     }
     const ExtractSummary summary = m_extractWatcher->result();
     const QString link = QUrl::fromLocalFile(m_extractTarget).toString();
-    QString message = summary.canceled ? tr("Extraction cancelled after %n file(s)", nullptr, summary.written)
-                                       : tr("Extracted %n file(s)", nullptr, summary.written);
-    message += QStringLiteral(" (%1) — <a href=\"%2\">%3</a>").arg(sizeText(summary.bytes), link, tr("Open folder"));
+    QString message;
+    if (m_exporting) {
+        message = summary.canceled ? tr("Export cancelled after %n file(s)", nullptr, summary.written)
+                                   : tr("Exported %n file(s)", nullptr, summary.written);
+        message += QStringLiteral(" (%1)").arg(tr("%n converted", nullptr, summary.converted));
+    } else {
+        message = summary.canceled ? tr("Extraction cancelled after %n file(s)", nullptr, summary.written)
+                                   : tr("Extracted %n file(s)", nullptr, summary.written);
+        message += QStringLiteral(" (%1)").arg(sizeText(summary.bytes));
+    }
+    message += QStringLiteral(" — <a href=\"%1\">%2</a>").arg(link, tr("Open folder"));
     m_statusLabel->setText(message);
 
     if (summary.failed > 0) {
         QMessageBox box(QMessageBox::Warning, appName(),
-                        tr("%n file(s) could not be extracted.", nullptr, summary.failed), QMessageBox::Ok, this);
+                        m_exporting ? tr("%n file(s) could not be exported.", nullptr, summary.failed)
+                                    : tr("%n file(s) could not be extracted.", nullptr, summary.failed),
+                        QMessageBox::Ok, this);
         box.setDetailedText(summary.errors.join('\n'));
         box.exec();
     }
+}
+
+// ---- Export / Import --------------------------------------------------------------------------
+
+void MainWindow::exportNodes(const std::vector<const VfsNode*>& nodes, QWidget* dialogParent)
+{
+    if (!m_session || m_extractWatcher->isRunning())
+        return;
+    QWidget* parent = dialogParent ? dialogParent : this;
+    std::vector<ExtractItem> items;
+    if (nodes.size() == 1 && nodes.front() == &m_session->vfs.root()) {
+        for (const VfsNode* file : Vfs::collectFiles(m_session->vfs.root()))
+            items.push_back({file, file->virtualPath()});
+    } else {
+        items = planExtraction(nodes);
+    }
+    if (items.empty())
+        return;
+
+    ExportOptions options;
+    if (hasTextures(*m_session, items)) {
+        const auto images = chooseImageExport(parent);
+        if (!images)
+            return;
+        options.images = *images;
+    }
+    QSettings settings;
+    const QString dir = QFileDialog::getExistingDirectory(
+        parent, tr("Export %n file(s) to", nullptr, static_cast<int>(items.size())),
+        settings.value("paths/lastExtractDir").toString());
+    if (dir.isEmpty())
+        return;
+    settings.setValue("paths/lastExtractDir", dir);
+
+    m_extractTarget = dir;
+    m_exporting = true;
+    m_progress->setRange(0, static_cast<int>(items.size()));
+    m_progress->setValue(0);
+    m_progress->show();
+    m_cancel->show();
+    m_extractWatcher->setFuture(startExport(m_session, std::move(items), toPath(dir), options));
+    updateActions();
+}
+
+bool MainWindow::ensureEditMode()
+{
+    if (!m_editMode)
+        setEditMode(true); // asks first
+    return m_editMode;
+}
+
+void MainWindow::importNode(const VfsNode* node, QWidget* dialogParent)
+{
+    if (!m_session || !node || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
+        return;
+    QWidget* parent = dialogParent ? dialogParent : this;
+    const ImportKind kind = importKind(*m_session, *node);
+    const QString name = toQString(node->name());
+    if (kind == ImportKind::None) {
+        QMessageBox::information(parent, tr("Import"),
+                                 tr("Nothing can be imported into %1 yet — only sound banks and textures.").arg(name));
+        return;
+    }
+    if (!ensureEditMode())
+        return;
+
+    QSettings settings;
+    const QString lastDir = settings.value("paths/lastImportDir", settings.value("paths/lastExtractDir")).toString();
+    auto session = m_session; // kept alive while the worker runs
+
+    if (kind == ImportKind::SoundBank) {
+        const QString dir = QFileDialog::getExistingDirectory(
+            parent, tr("Import into %1 the .wav files from").arg(name), lastDir);
+        if (dir.isEmpty())
+            return;
+        settings.setValue("paths/lastImportDir", dir);
+        auto result = runBusy<Result<BankImport>>(parent, tr("Encoding sounds for %1…").arg(name),
+                                                  [session, node, folder = toPath(dir)] {
+                                                      return planBankImport(*session, *node, folder);
+                                                  });
+        if (!result) {
+            QMessageBox::warning(parent, tr("Import"), toQString(result.error().message));
+            return;
+        }
+        auto plan = planReplaceData(*session, *node, std::move(result->data),
+                                    tr("the .wav files in %1").arg(QFileInfo(dir).fileName()));
+        if (!plan) {
+            QMessageBox::warning(parent, tr("Import"), toQString(plan.error().message));
+            return;
+        }
+        plan->notes << tr("%n sound(s) replaced", nullptr, result->replaced)
+                    << tr("%n sound(s) with no matching file stay as they were", nullptr, result->kept);
+        QStringList problems;
+        if (!result->unmatched.isEmpty())
+            problems << tr("%n file(s) match no sound and are skipped: %1", nullptr,
+                           static_cast<int>(result->unmatched.size()))
+                            .arg(result->unmatched.mid(0, 5).join(QStringLiteral(", ")));
+        if (!result->failed.isEmpty())
+            problems << tr("%n file(s) couldn't be used: %1", nullptr, static_cast<int>(result->failed.size()))
+                            .arg(result->failed.mid(0, 3).join(QStringLiteral("; ")));
+        plan->warning = problems.join(QStringLiteral(" "));
+        confirmAndReplace(std::move(*plan), /*edited=*/false, parent);
+        return;
+    }
+
+    // Texture: a picture, converted to the pixel format the user picks.
+    const QString file = QFileDialog::getOpenFileName(
+        parent, tr("Import a picture into %1").arg(name), lastDir,
+        tr("Pictures (*.png *.dds *.jpg *.jpeg *.bmp);;All files (*)"));
+    if (file.isEmpty())
+        return;
+    settings.setValue("paths/lastImportDir", QFileInfo(file).absolutePath());
+    auto target = textureTarget(*session, *node);
+    if (!target) {
+        QMessageBox::warning(parent, tr("Import"), toQString(target.error().message));
+        return;
+    }
+    auto picture = loadPicture(toPath(file));
+    if (!picture) {
+        QMessageBox::warning(parent, tr("Import"),
+                             tr("Couldn't read %1: %2").arg(QFileInfo(file).fileName(), toQString(picture.error().message)));
+        return;
+    }
+    const auto format = chooseTextureFormat(parent, *target, *picture, QFileInfo(file).fileName(), name);
+    if (!format)
+        return;
+    struct Built {
+        Result<ByteBuffer> data;
+        QStringList notes;
+    };
+    const Built built = runBusy<Built>(parent, tr("Converting %1…").arg(QFileInfo(file).fileName()),
+                                       [session, node, picture = std::move(*picture), format = *format] {
+                                           Built b{ByteBuffer{}, {}};
+                                           b.data = buildTextureImport(*session, *node, picture, format, b.notes);
+                                           return b;
+                                       });
+    if (!built.data) {
+        QMessageBox::warning(parent, tr("Import"), toQString(built.data.error().message));
+        return;
+    }
+    auto plan = planReplaceData(*session, *node, *built.data,
+                                tr("%1 as %2").arg(QFileInfo(file).fileName(), toQString(image::pixelFormatName(*format))));
+    if (!plan) {
+        QMessageBox::warning(parent, tr("Import"), toQString(plan.error().message));
+        return;
+    }
+    plan->notes = built.notes;
+    confirmAndReplace(std::move(*plan), /*edited=*/false, parent);
+}
+
+void MainWindow::replaceSound(PreviewWindow* window, int index)
+{
+    const VfsNode* node = window ? window->node() : nullptr;
+    if (!m_session || !node || index < 0 || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
+        return;
+    if (importKind(*m_session, *node) != ImportKind::SoundBank || !ensureEditMode())
+        return;
+    QSettings settings;
+    const QString file = QFileDialog::getOpenFileName(
+        window, tr("Replace the sound with…"),
+        settings.value("paths/lastImportDir", settings.value("paths/lastExtractDir")).toString(),
+        tr("Wave audio (*.wav)"));
+    if (file.isEmpty())
+        return;
+    settings.setValue("paths/lastImportDir", QFileInfo(file).absolutePath());
+    auto session = m_session;
+    auto result = runBusy<Result<BankImport>>(window, tr("Encoding %1…").arg(QFileInfo(file).fileName()),
+                                              [session, node, index, path = toPath(file)] {
+                                                  return planSoundReplace(*session, *node,
+                                                                          static_cast<std::size_t>(index), path);
+                                              });
+    if (!result) {
+        QMessageBox::warning(window, tr("Replace Sound"), toQString(result.error().message));
+        return;
+    }
+    auto plan = planReplaceData(*session, *node, std::move(result->data), QFileInfo(file).fileName());
+    if (!plan) {
+        QMessageBox::warning(window, tr("Replace Sound"), toQString(plan.error().message));
+        return;
+    }
+    plan->notes << tr("Only sound #%1 changes; the other %n stay as they were.", nullptr, result->kept).arg(index + 1);
+    confirmAndReplace(std::move(*plan), /*edited=*/false, window);
 }
 
 // ---- Window events ----------------------------------------------------------------------------

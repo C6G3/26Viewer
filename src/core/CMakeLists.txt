@@ -29,6 +29,7 @@ add_library(viewer_core STATIC
     src/GameRegistry.cpp
     src/Hash.cpp
     src/Image.cpp
+    src/ImageEncode.cpp
     src/Mesh.cpp
     src/RandomAccessFile.cpp
     src/Text.cpp

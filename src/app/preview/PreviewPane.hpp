@@ -56,6 +56,8 @@ signals:
     void backupRequested();
     /// The user clicked "Edit" on a text file's preview.
     void editRequested();
+    /// The user asked to replace sound `index` of the shown bank.
+    void replaceSoundRequested(int index);
 
 private:
     enum Tab { PreviewTab, StructureTab, HexTab, PropertiesTab };

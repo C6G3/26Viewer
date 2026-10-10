@@ -10,7 +10,9 @@
 //                                +72 u16 loop  +74 u8 bits (4)  +75 u8 channels
 //     type 3 (80 bytes, PCM16):  +44 offset +48 size +52 volume +56 25
 //                                +60 rate +64 bits (16) +68 channels
-//   then the audio data ("DATA" chunks, or 0x800-aligned in streaming banks).
+//   then each sound's data in record order, as "DATA" u32 (size + 8) + data;
+//   streaming banks pad with zeros so every data block starts on a 0x800
+//   boundary, and pad the file to 0x800.
 //
 // The ADPCM is PlayStation-style ADPCM in 33-byte frames, recovered from the
 // decoder in Blur.exe (0x540C80; filter table 0xE858F0, scale table 0xE85918).
@@ -200,6 +202,170 @@ std::vector<std::int16_t> baf::decodeAdpcm(ByteSpan data, unsigned channels, std
                     ++written;
                 }
             }
+        }
+    }
+    return out;
+}
+
+ByteBuffer baf::encodeAdpcm(std::span<const std::int16_t> samples, unsigned channels)
+{
+    static constexpr std::array<std::array<float, 2>, 5> kFilters{{
+        {0.0f, 0.0f}, {0.9375f, 0.0f}, {1.796875f, -0.8125f}, {1.53125f, -0.859375f}, {1.90625f, -0.9375f}}};
+    if (channels == 0)
+        return {};
+    const std::size_t frames = samples.size() / channels;
+    const std::size_t blocks = (frames + kFrameSamples - 1) / kFrameSamples;
+    ByteBuffer out(blocks * channels * kFrameBytes);
+
+    for (unsigned c = 0; c < channels; ++c) {
+        float h1 = 0.0f; // decoder history, kept exactly as the game's decoder keeps it
+        float h2 = 0.0f;
+        std::array<float, kFrameSamples> x{};
+        for (std::size_t b = 0; b < blocks; ++b) {
+            for (std::size_t i = 0; i < kFrameSamples; ++i) {
+                const std::size_t frame = b * kFrameSamples + i;
+                x[i] = frame < frames ? static_cast<float>(samples[frame * channels + c]) : 0.0f;
+            }
+            // Try every filter; for each, the shift that fits its largest residual and its
+            // neighbours, simulating the decoder; keep the combination with the least error.
+            struct Choice {
+                unsigned filter = 0, shift = 0;
+                double error = 1e300;
+            } best;
+            for (unsigned f = 0; f < kFilters.size(); ++f) {
+                const auto& k = kFilters[f];
+                float p1 = h1, p2 = h2, peak = 0.0f;
+                for (float v : x) { // residuals against the ideal signal
+                    peak = std::max(peak, std::abs(v - (p1 * k[0] + p2 * k[1])));
+                    p2 = p1;
+                    p1 = v;
+                }
+                int fit = 12;
+                while (fit > 0 && peak > 7.0f * std::ldexp(4096.0f, -fit))
+                    --fit;
+                for (int shift = std::max(0, fit - 1); shift <= std::min(12, fit + 1); ++shift) {
+                    const float scale = std::ldexp(4096.0f, -shift);
+                    float s1 = h1, s2 = h2;
+                    double error = 0;
+                    for (float v : x) {
+                        const float predicted = s1 * k[0] + s2 * k[1];
+                        const float n = std::clamp(std::round((v - predicted) / scale), -8.0f, 7.0f);
+                        const float y = n * scale + predicted;
+                        const double d = v - std::clamp(y, -32768.0f, 32767.0f);
+                        error += d * d;
+                        s2 = s1;
+                        s1 = y;
+                    }
+                    if (error < best.error)
+                        best = {f, static_cast<unsigned>(shift), error};
+                }
+            }
+            // Emit the frame with the chosen filter and shift.
+            std::byte* frame = out.data() + (b * channels + c) * kFrameBytes;
+            frame[0] = static_cast<std::byte>(best.filter << 4 | best.shift);
+            const auto& k = kFilters[best.filter];
+            const float scale = std::ldexp(4096.0f, -static_cast<int>(best.shift));
+            for (std::size_t i = 0; i < kFrameSamples; ++i) {
+                const float predicted = h1 * k[0] + h2 * k[1];
+                const int n = static_cast<int>(std::clamp(std::round((x[i] - predicted) / scale), -8.0f, 7.0f));
+                const float y = static_cast<float>(n) * scale + predicted;
+                h2 = h1;
+                h1 = y;
+                const auto nibble = static_cast<unsigned>(n & 0x0F);
+                std::byte& target = frame[1 + i / 2];
+                target |= static_cast<std::byte>(i % 2 ? nibble << 4 : nibble); // low nibble first
+            }
+        }
+    }
+    return out;
+}
+
+Result<ByteBuffer> BafFormat::rebuild(ByteSpan original, std::span<const std::optional<AudioClip>> replacements) const
+{
+    if (original.size() < 0x34 || std::memcmp(original.data(), "BANK", 4) != 0)
+        return fail(ErrorCode::InvalidFormat, "not a Blur audio bank (no BANK header)");
+    const auto headerSize = loadScalar<std::uint32_t>(original, 4);
+    const auto count = loadScalar<std::uint32_t>(original, 12);
+    if (replacements.size() > count)
+        return fail(ErrorCode::InvalidFormat, "{} replacements for a bank of {} sounds", replacements.size(), count);
+
+    struct Record {
+        std::size_t at = 0;
+        std::uint32_t type = 0, offset = 0, size = 0;
+    };
+    std::vector<Record> records;
+    std::size_t p = headerSize;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (p + 76 > original.size() || std::memcmp(original.data() + p, "WAVE", 4) != 0)
+            return fail(ErrorCode::InvalidFormat, "WAVE record {} missing", i);
+        const Record r{p, loadScalar<std::uint32_t>(original, p + 8), loadScalar<std::uint32_t>(original, p + 44),
+                       loadScalar<std::uint32_t>(original, p + 48)};
+        if (std::size_t{r.offset} + r.size > original.size())
+            return fail(ErrorCode::InvalidFormat, "sound {} has bad data bounds", i);
+        records.push_back(r);
+        p += loadScalar<std::uint32_t>(original, p + 4);
+    }
+    const std::size_t recordsEnd = p;
+    // Streaming banks start every sound's data on a 2 KiB boundary.
+    const std::uint32_t firstData = records.empty() ? 0 : std::ranges::min(records, {}, &Record::offset).offset;
+    const bool aligned = !records.empty() && firstData % 0x800 == 0 && firstData > recordsEnd + 8;
+
+    const auto write = [&](const std::vector<std::optional<ByteBuffer>>& newData) {
+        ByteBuffer out(original.begin(), original.begin() + static_cast<std::ptrdiff_t>(recordsEnd));
+        const auto pad = [&](std::size_t to) { out.resize(out.size() + (to - out.size() % to) % to); };
+        for (std::size_t i = 0; i < records.size(); ++i) {
+            if (aligned)
+                out.resize(out.size() + (0x800 - (out.size() + 8) % 0x800) % 0x800);
+            const ByteSpan data = i < newData.size() && newData[i]
+                                      ? ByteSpan(*newData[i])
+                                      : original.subspan(records[i].offset, records[i].size);
+            const auto putU32 = [&](std::size_t at, std::uint32_t v) { std::memcpy(out.data() + at, &v, 4); };
+            out.insert(out.end(), {std::byte{'D'}, std::byte{'A'}, std::byte{'T'}, std::byte{'A'}, {}, {}, {}, {}});
+            putU32(out.size() - 4, static_cast<std::uint32_t>(data.size() + 8));
+            putU32(records[i].at + 44, static_cast<std::uint32_t>(out.size()));
+            putU32(records[i].at + 48, static_cast<std::uint32_t>(data.size()));
+            out.insert(out.end(), data.begin(), data.end());
+        }
+        if (aligned)
+            pad(0x800);
+        return out;
+    };
+
+    // Only rewrite banks whose layout this writer reproduces exactly.
+    if (const ByteBuffer same = write({}); !std::ranges::equal(same, original))
+        return fail(ErrorCode::Unsupported, "this bank's data layout isn't supported for rebuilding yet");
+
+    std::vector<std::optional<ByteBuffer>> newData(records.size());
+    for (std::size_t i = 0; i < replacements.size(); ++i) {
+        if (!replacements[i])
+            continue;
+        const AudioClip& clip = *replacements[i];
+        if (clip.channels == 0 || clip.channels > 8 || clip.sampleRate == 0)
+            return fail(ErrorCode::InvalidFormat, "replacement for sound {} has no usable audio", i + 1);
+        if (records[i].type == 3) { // 16-bit PCM stays PCM
+            ByteBuffer pcm(clip.samples.size() * 2);
+            std::memcpy(pcm.data(), clip.samples.data(), pcm.size());
+            newData[i] = std::move(pcm);
+        } else {
+            newData[i] = baf::encodeAdpcm(clip.samples, clip.channels);
+        }
+    }
+    ByteBuffer out = write(newData);
+    // New format details for the replaced sounds (names, volume and loop flags are kept).
+    for (std::size_t i = 0; i < replacements.size(); ++i) {
+        if (!replacements[i])
+            continue;
+        const AudioClip& clip = *replacements[i];
+        const std::size_t at = records[i].at;
+        const auto putU32 = [&](std::size_t offset, std::uint32_t v) { std::memcpy(out.data() + at + offset, &v, 4); };
+        if (records[i].type == 3) {
+            putU32(60, clip.sampleRate);
+            putU32(64, 16);
+            putU32(68, clip.channels);
+        } else {
+            putU32(64, clip.sampleRate);
+            putU32(68, static_cast<std::uint32_t>(clip.frames()));
+            out[at + 75] = static_cast<std::byte>(clip.channels);
         }
     }
     return out;

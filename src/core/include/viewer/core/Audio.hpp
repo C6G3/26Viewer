@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -61,6 +62,19 @@ public:
     /// `header` holds up to the first 4 KiB of the file.
     [[nodiscard]] virtual bool canOpen(std::string_view extension, ByteSpan header) const = 0;
     [[nodiscard]] virtual Result<std::unique_ptr<SoundBank>> open(std::shared_ptr<const ByteSource> source) const = 0;
+
+    /// Whether rebuild() is supported (banks can be imported / sounds replaced).
+    [[nodiscard]] virtual bool canRebuild() const noexcept { return false; }
+    /// A copy of the bank `original` in which sound i is re-encoded from
+    /// `replacements[i]` when that holds a clip; every other sound, name and
+    /// setting stays exactly as it was.
+    [[nodiscard]] virtual Result<ByteBuffer> rebuild(ByteSpan original,
+                                                     std::span<const std::optional<AudioClip>> replacements) const
+    {
+        (void)original;
+        (void)replacements;
+        return std::unexpected(Error{ErrorCode::Unsupported, "this audio format can't be rebuilt yet"});
+    }
 };
 
 namespace audio {
@@ -70,6 +84,11 @@ namespace audio {
 
 /// Reads 8/16-bit PCM .wav files.
 Result<AudioClip> decodeWav(ByteSpan file);
+
+/// File names (without ".wav") for a bank's sounds when exported to a folder:
+/// the sound names made safe for any file system, with "_2", "_3"… added to
+/// repeats. Import matches files back to sounds with the same names.
+[[nodiscard]] std::vector<std::string> soundFileNames(std::span<const SoundInfo> sounds);
 
 /// Treats a plain .wav file as a bank with one sound.
 [[nodiscard]] std::shared_ptr<const SoundBankFormat> wavFormat();

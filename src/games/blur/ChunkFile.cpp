@@ -151,21 +151,65 @@ bool TextureDecoder::canDecode(std::string_view extension, ByteSpan data) const
     return chunk && chunk->name == "Texture";
 }
 
-Result<Image> TextureDecoder::decode(ByteSpan data) const
+namespace {
+
+// Data payload: u32 width, height, depth, mipCount, format (FourCC or
+// D3DFORMAT), u32 unknown (same for related textures), u32 3, then every mip
+// level in order.
+constexpr std::size_t kDataHeader = 28;
+
+struct TextureParts {
+    Chunk root;
+    const Chunk* data = nullptr;
+    ByteSpan payload;
+};
+
+Result<TextureParts> textureParts(ByteSpan data)
 {
     auto root = parseChunkFile(data);
     if (!root)
         return std::unexpected(root.error());
-    const Chunk* dataChunk = root->child("Data");
-    if (root->name != "Texture" || !dataChunk)
+    TextureParts parts;
+    parts.root = std::move(*root);
+    parts.data = parts.root.child("Data");
+    if (parts.root.name != "Texture" || !parts.data)
         return fail(ErrorCode::InvalidFormat, "texture has no Data chunk");
-
-    // Data payload: u32 width, height, depth, mipCount, format (FourCC or
-    // D3DFORMAT), u32 unknown, u32 unknown, then every mip level in order.
-    constexpr std::size_t kDataHeader = 28;
-    if (dataChunk->payloadSize() < kDataHeader)
+    if (parts.data->payloadSize() < kDataHeader)
         return fail(ErrorCode::InvalidFormat, "texture Data chunk too small");
-    const ByteSpan payload = data.subspan(dataChunk->payloadOffset(), dataChunk->payloadSize());
+    parts.payload = data.subspan(parts.data->payloadOffset(), parts.data->payloadSize());
+    return parts;
+}
+
+void putU32(ByteBuffer& out, std::uint32_t v)
+{
+    for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<std::byte>((v >> (8 * i)) & 0xFFu));
+}
+
+/// A chunk header: name, NULs to a multiple of 4, u32 size, u16 count, u16 kind.
+void putChunkHeader(ByteBuffer& out, const Chunk& like, std::size_t payloadSize)
+{
+    const std::size_t start = out.size();
+    out.insert(out.end(), reinterpret_cast<const std::byte*>(like.name.data()),
+               reinterpret_cast<const std::byte*>(like.name.data() + like.name.size()));
+    do
+        out.push_back(std::byte{0});
+    while ((out.size() - start) % 4 != 0);
+    putU32(out, static_cast<std::uint32_t>(out.size() - start + 8 + payloadSize));
+    out.push_back(static_cast<std::byte>(like.count & 0xFF));
+    out.push_back(static_cast<std::byte>(like.count >> 8));
+    out.push_back(static_cast<std::byte>(like.kind));
+    out.push_back(std::byte{0});
+}
+
+} // namespace
+
+Result<Image> TextureDecoder::decode(ByteSpan data) const
+{
+    auto parts = textureParts(data);
+    if (!parts)
+        return std::unexpected(parts.error());
+    const ByteSpan payload = parts->payload;
     const auto width = loadScalar<std::uint32_t>(payload, 0);
     const auto height = loadScalar<std::uint32_t>(payload, 4);
     const auto depth = loadScalar<std::uint32_t>(payload, 8);
@@ -182,6 +226,87 @@ Result<Image> TextureDecoder::decode(ByteSpan data) const
         img->layers = std::max(1u, depth);
     }
     return img;
+}
+
+Result<image::Surfaces> TextureDecoder::surfaces(ByteSpan data) const
+{
+    auto parts = textureParts(data);
+    if (!parts)
+        return std::unexpected(parts.error());
+    const ByteSpan payload = parts->payload;
+    const auto formatCode = loadScalar<std::uint32_t>(payload, 16);
+    const auto format = image::fromD3DFormat(formatCode);
+    if (!format)
+        return fail(ErrorCode::Unsupported, "unsupported texture format {:#x}", formatCode);
+    image::Surfaces s;
+    s.format = *format;
+    s.width = loadScalar<std::uint32_t>(payload, 0);
+    s.height = loadScalar<std::uint32_t>(payload, 4);
+    s.layers = std::max(1u, loadScalar<std::uint32_t>(payload, 8));
+    s.mipCount = std::max(1u, loadScalar<std::uint32_t>(payload, 12));
+    if (s.width == 0 || s.height == 0 || s.width > 16384 || s.height > 16384 || s.mipCount > 16 || s.layers > 6)
+        return fail(ErrorCode::InvalidFormat, "invalid texture header");
+    const std::size_t size = image::chainSize(s.format, s.width, s.height, s.mipCount) * s.layers;
+    if (payload.size() - kDataHeader < size)
+        return fail(ErrorCode::OutOfBounds, "texture data is shorter than its {} mip levels", s.mipCount);
+    const ByteSpan pixels = payload.subspan(kDataHeader, size);
+    s.data.assign(pixels.begin(), pixels.end());
+    return s;
+}
+
+std::vector<image::PixelFormat> TextureDecoder::importFormats(ByteSpan data) const
+{
+    using image::PixelFormat;
+    std::vector<PixelFormat> formats{PixelFormat::BC1, PixelFormat::BC2, PixelFormat::BC3, PixelFormat::A8R8G8B8};
+    auto s = surfaces(data);
+    if (!s || s->layers != 1)
+        return {}; // only flat textures can be replaced so far
+    if (!std::ranges::contains(formats, s->format) && image::canEncode(s->format))
+        formats.push_back(s->format);
+    return formats;
+}
+
+Result<ByteBuffer> TextureDecoder::rebuild(ByteSpan original, const image::Surfaces& s) const
+{
+    auto parts = textureParts(original);
+    if (!parts)
+        return std::unexpected(parts.error());
+    if (s.layers != 1)
+        return fail(ErrorCode::Unsupported, "only flat textures can be written");
+    const std::size_t size = image::chainSize(s.format, s.width, s.height, s.mipCount);
+    if (s.data.size() < size)
+        return fail(ErrorCode::OutOfBounds, "texture data is {} bytes, {} needed", s.data.size(), size);
+
+    // Texture { Header (kept), Data (new) } — rewritten child by child so any
+    // other chunk the file has stays as it was.
+    const Chunk& root = parts->root;
+    ByteBuffer body;
+    for (const Chunk& child : root.children) {
+        if (&child != parts->data) {
+            const ByteSpan bytes = original.subspan(child.offset, child.size);
+            body.insert(body.end(), bytes.begin(), bytes.end());
+            continue;
+        }
+        ByteBuffer payload;
+        putU32(payload, s.width);
+        putU32(payload, s.height);
+        putU32(payload, 1);
+        putU32(payload, s.mipCount);
+        putU32(payload, image::toD3DFormat(s.format));
+        const ByteSpan kept = parts->payload.subspan(20, 8); // the unknown value and the 3
+        payload.insert(payload.end(), kept.begin(), kept.end());
+        payload.insert(payload.end(), s.data.begin(), s.data.begin() + static_cast<std::ptrdiff_t>(size));
+        putChunkHeader(body, child, payload.size());
+        body.insert(body.end(), payload.begin(), payload.end());
+    }
+    ByteBuffer out;
+    const ByteSpan before = original.first(root.offset);
+    out.insert(out.end(), before.begin(), before.end());
+    putChunkHeader(out, root, body.size());
+    out.insert(out.end(), body.begin(), body.end());
+    const ByteSpan after = original.subspan(root.offset + root.size);
+    out.insert(out.end(), after.begin(), after.end());
+    return out;
 }
 
 } // namespace viewer::games::blur

@@ -25,6 +25,7 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     setCentralWidget(m_pane);
     connect(m_pane, &PreviewPane::backupRequested, this, &PreviewWindow::backupRequested);
     connect(m_pane, &PreviewPane::editRequested, this, &PreviewWindow::editRequested);
+    connect(m_pane, &PreviewPane::replaceSoundRequested, this, &PreviewWindow::replaceSoundRequested);
 
     m_revealAction = new QAction(icons::theme(TI::GoUp, QStyle::SP_FileDialogToParent), tr("Show in &List"), this);
     m_revealAction->setStatusTip(tr("Select this file in the main window"));
@@ -42,6 +43,19 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     m_replaceAction->setEnabled(false);
     connect(m_replaceAction, &QAction::triggered, this, [this] { emit replaceRequested(QString()); });
 
+    m_exportAction = new QAction(icons::theme(TI::DocumentSend, QStyle::SP_DialogSaveButton), tr("E&xport…"), this);
+    m_exportAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_E));
+    m_exportAction->setStatusTip(tr("Save this file converted for other programs (sounds → .wav, models → .obj, "
+                                    "textures → .png / .dds / .jpg / .bmp)"));
+    connect(m_exportAction, &QAction::triggered, this, &PreviewWindow::exportRequested);
+
+    m_importAction = new QAction(icons::theme(TI::DocumentOpen, QStyle::SP_DialogOpenButton), tr("&Import…"), this);
+    m_importAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    m_importAction->setStatusTip(tr("Convert your own files back into this one (a folder of .wav files into a "
+                                    "sound bank, a picture into a texture). Needs Edit Mode."));
+    m_importAction->setEnabled(false);
+    connect(m_importAction, &QAction::triggered, this, &PreviewWindow::importRequested);
+
     auto* close = new QAction(tr("Close"), this);
     close->setShortcuts({QKeySequence(QKeySequence::Close), QKeySequence(Qt::CTRL | Qt::Key_W),
                          QKeySequence(Qt::Key_Escape)});
@@ -56,7 +70,9 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     toolbar->addAction(m_revealAction);
     toolbar->addSeparator();
     toolbar->addAction(m_extractAction);
+    toolbar->addAction(m_exportAction);
     toolbar->addAction(m_replaceAction);
+    toolbar->addAction(m_importAction);
 
     statusBar(); // shows status tips and drag & drop feedback
     if (!restoreGeometry(QSettings().value("preview/geometry").toByteArray()))
@@ -77,6 +93,7 @@ void PreviewWindow::showNode(const VfsNode* node, bool properties)
     else
         m_pane->showNode(node);
     m_extractAction->setEnabled(node != nullptr);
+    m_exportAction->setEnabled(node != nullptr);
     m_revealAction->setEnabled(node != nullptr);
     setEditMode(m_editMode);
     updateTitle();
@@ -92,6 +109,7 @@ void PreviewWindow::setEditMode(bool on)
     m_editMode = on;
     const VfsNode* n = node();
     m_replaceAction->setEnabled(on && n && Vfs::canReplace(*n));
+    m_importAction->setEnabled(on && n && m_importCheck && m_importCheck(n));
 }
 
 void PreviewWindow::setBackupWarning(const QString& fileName)

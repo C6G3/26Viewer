@@ -44,11 +44,13 @@ signals:
 
 private:
     void startAt(qint64 byteOffset);
+    /// Stops and deletes the output and the buffer it was reading.
+    void releaseSink();
     void onSinkState();
 
     QAudioSink* m_sink = nullptr;
     QByteArray m_pcm;
-    QBuffer m_buffer;
+    QBuffer* m_device = nullptr; ///< Read by m_sink only; a new one for every start.
     qint64 m_startByte = 0;
     int m_bytesPerSecond = 0;
     double m_duration = 0;
@@ -69,8 +71,15 @@ public:
     /// `keepAlive` keeps the bank's data (session / archive) valid while shown.
     void setBank(std::shared_ptr<const SoundBank> bank, std::shared_ptr<const void> keepAlive);
     void clear();
+    /// Shows "Replace Sound…" (only banks the app can rebuild).
+    void setReplaceable(bool on);
+
+signals:
+    /// The user asked to replace sound `index` (in bank order) with a .wav file.
+    void replaceSoundRequested(int index);
 
 private:
+    void showContextMenu(const QPoint& pos);
     void playSelected();
     void exportSounds();
     void updateTime();
@@ -93,6 +102,7 @@ private:
     QLabel* m_time;
     QCheckBox* m_loop;
     QToolButton* m_exportButton;
+    QToolButton* m_replaceButton;
     QTimer* m_timer;
 };
 

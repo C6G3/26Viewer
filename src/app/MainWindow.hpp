@@ -147,6 +147,17 @@ private:
     void extractNodes(const std::vector<const VfsNode*>& nodes);
     void onExtractFinished();
 
+    // Export / Import (see Exporter): converted copies out, and back in.
+    /// Exports `nodes` (the whole game for the root) converted where possible.
+    void exportNodes(const std::vector<const VfsNode*>& nodes, QWidget* dialogParent = nullptr);
+    /// Rebuilds `node` from exported files: a folder of .wav files for a
+    /// sound bank, a picture for a texture.
+    void importNode(const VfsNode* node, QWidget* dialogParent = nullptr);
+    /// Replaces one sound of the bank shown in `window` with a .wav file.
+    void replaceSound(PreviewWindow* window, int index);
+    /// Turns Edit Mode on if it's off (the user confirms); false if it stays off.
+    bool ensureEditMode();
+
     // Replacing assets (see AssetEditor)
     void replaceSelected();
     /// Asks for a replacement file for `node`, then replaces it.
@@ -184,6 +195,7 @@ private:
     QFutureWatcher<ExtractSummary>* m_extractWatcher;
     QFutureWatcher<EditResult>* m_editWatcher;
     QString m_extractTarget;
+    bool m_exporting = false; ///< The running extraction job is an Export.
     QString m_pendingSelect; ///< Selected once the next session finishes loading.
     struct Reopen {
         const Game* game = nullptr; ///< Null for a standalone archive or folder.
@@ -212,6 +224,8 @@ private:
     QAction* m_openFolderAction = nullptr;
     QAction* m_extractAction = nullptr;
     QAction* m_extractAllAction = nullptr;
+    QAction* m_exportAction = nullptr;
+    QAction* m_importAction = nullptr;
     QAction* m_copyPathAction = nullptr;
     QAction* m_revealAction = nullptr;
     QAction* m_replaceAction = nullptr;

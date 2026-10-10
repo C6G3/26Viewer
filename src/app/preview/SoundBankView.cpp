@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QLocale>
 #include <QMediaDevices>
+#include <QMenu>
 #include <QSettings>
 #include <QSlider>
 #include <QTimer>
@@ -29,6 +30,37 @@
 namespace viewer::app {
 
 namespace {
+
+/// Converts interleaved 16-bit audio to another rate / channel count (linear
+/// interpolation), for output devices that don't accept the clip's own format.
+QByteArray convertPcm(const std::vector<std::int16_t>& in, int inRate, int inChannels, int outRate, int outChannels)
+{
+    const std::size_t inFrames = in.size() / static_cast<std::size_t>(std::max(1, inChannels));
+    const auto outFrames = static_cast<std::size_t>(static_cast<double>(inFrames) * outRate / std::max(1, inRate));
+    QByteArray out(static_cast<qsizetype>(outFrames * static_cast<std::size_t>(outChannels) * 2), Qt::Uninitialized);
+    auto* dst = reinterpret_cast<std::int16_t*>(out.data());
+    auto sample = [&](std::size_t frame, int channel) {
+        frame = std::min(frame, inFrames - 1);
+        if (outChannels < inChannels) { // down-mix: average the input channels
+            int sum = 0;
+            for (int c = 0; c < inChannels; ++c)
+                sum += in[frame * static_cast<std::size_t>(inChannels) + static_cast<std::size_t>(c)];
+            return static_cast<float>(sum) / static_cast<float>(inChannels);
+        }
+        return static_cast<float>(in[frame * static_cast<std::size_t>(inChannels)
+                                     + static_cast<std::size_t>(std::min(channel, inChannels - 1))]);
+    };
+    for (std::size_t f = 0; f < outFrames && inFrames > 0; ++f) {
+        const double pos = static_cast<double>(f) * inRate / outRate;
+        const auto i = static_cast<std::size_t>(pos);
+        const auto t = static_cast<float>(pos - static_cast<double>(i));
+        for (int c = 0; c < outChannels; ++c) {
+            const float v = sample(i, c) * (1.0f - t) + sample(i + 1, c) * t;
+            *dst++ = static_cast<std::int16_t>(std::clamp(v, -32768.0f, 32767.0f));
+        }
+    }
+    return out;
+}
 
 QString timeText(double seconds)
 {
@@ -50,23 +82,48 @@ AudioPlayer::~AudioPlayer()
 void AudioPlayer::setClip(const AudioClip& clip)
 {
     stop();
-    m_pcm = QByteArray(reinterpret_cast<const char*>(clip.samples.data()),
-                       static_cast<qsizetype>(clip.samples.size() * sizeof(std::int16_t)));
     m_rate = clip.sampleRate;
     m_channels = clip.channels;
-    m_bytesPerSecond = static_cast<int>(clip.sampleRate * clip.channels * 2);
+    m_pcm = QByteArray(reinterpret_cast<const char*>(clip.samples.data()),
+                       static_cast<qsizetype>(clip.samples.size() * sizeof(std::int16_t)));
+    // Not every output device takes every rate (game audio is often 22 or 32 kHz
+    // mono): convert to what the device prefers instead of letting it garble.
+    QAudioFormat format;
+    format.setSampleRate(static_cast<int>(m_rate));
+    format.setChannelCount(m_channels);
+    format.setSampleFormat(QAudioFormat::Int16);
+    const QAudioDevice device = QMediaDevices::defaultAudioOutput();
+    if (!device.isNull() && !clip.samples.empty() && m_channels > 0 && !device.isFormatSupported(format)) {
+        const QAudioFormat preferred = device.preferredFormat();
+        const int rate = preferred.sampleRate() > 0 ? preferred.sampleRate() : 48000;
+        const int channels = std::clamp(preferred.channelCount(), 1, 2);
+        m_pcm = convertPcm(clip.samples, static_cast<int>(m_rate), m_channels, rate, channels);
+        m_rate = static_cast<std::uint32_t>(rate);
+        m_channels = static_cast<std::uint16_t>(channels);
+    }
+    m_bytesPerSecond = static_cast<int>(m_rate * m_channels * 2);
     m_duration = clip.seconds();
     m_startByte = 0;
 }
 
-void AudioPlayer::startAt(qint64 byteOffset)
+void AudioPlayer::releaseSink()
 {
+    // deleteLater: this can run inside the sink's own stateChanged signal (looping).
     if (m_sink) {
         m_sink->disconnect(this);
         m_sink->stop();
-        delete m_sink;
+        m_sink->deleteLater();
         m_sink = nullptr;
     }
+    if (m_device) {
+        m_device->deleteLater(); // after the sink (deleted first, queued first)
+        m_device = nullptr;
+    }
+}
+
+void AudioPlayer::startAt(qint64 byteOffset)
+{
+    releaseSink();
     QAudioFormat format;
     format.setSampleRate(static_cast<int>(m_rate));
     format.setChannelCount(m_channels);
@@ -78,13 +135,15 @@ void AudioPlayer::startAt(qint64 byteOffset)
     }
     m_sink = new QAudioSink(device, format, this);
     connect(m_sink, &QAudioSink::stateChanged, this, &AudioPlayer::onSinkState);
-    m_buffer.close();
-    m_buffer.setBuffer(&m_pcm);
-    m_buffer.open(QIODevice::ReadOnly);
+    // A fresh buffer for every start: the audio output reads it on its own
+    // thread, so it is never shared with (or seeked under) an earlier output.
+    m_device = new QBuffer(this);
+    m_device->setData(m_pcm);
+    m_device->open(QIODevice::ReadOnly);
     const int frameBytes = m_channels * 2;
     m_startByte = std::clamp<qint64>(byteOffset - byteOffset % std::max(1, frameBytes), 0, m_pcm.size());
-    m_buffer.seek(m_startByte);
-    m_sink->start(&m_buffer);
+    m_device->seek(m_startByte);
+    m_sink->start(m_device);
     m_playing = true;
     emit stateChanged(true);
 }
@@ -93,7 +152,7 @@ void AudioPlayer::onSinkState()
 {
     if (!m_sink)
         return;
-    if (m_sink->state() == QAudio::IdleState && m_buffer.atEnd()) { // reached the end
+    if (m_sink->state() == QAudio::IdleState && m_device && m_device->atEnd()) { // reached the end
         if (m_loop) {
             startAt(0);
             return;
@@ -130,13 +189,7 @@ void AudioPlayer::pause()
 
 void AudioPlayer::stop()
 {
-    if (m_sink) {
-        m_sink->disconnect(this);
-        m_sink->stop();
-        delete m_sink;
-        m_sink = nullptr;
-    }
-    m_buffer.close();
+    releaseSink();
     const bool was = m_playing;
     m_playing = false;
     m_startByte = 0;
@@ -170,7 +223,7 @@ SoundBankView::SoundBankView(QWidget* parent)
       m_export(new QFutureWatcher<QString>(this)), m_info(new QLabel(this)), m_list(new QTreeWidget(this)),
       m_play(new QToolButton(this)), m_stop(new QToolButton(this)), m_position(new QSlider(Qt::Horizontal, this)),
       m_time(new QLabel(this)), m_loop(new QCheckBox(tr("Loop"), this)), m_exportButton(new QToolButton(this)),
-      m_timer(new QTimer(this))
+      m_replaceButton(new QToolButton(this)), m_timer(new QTimer(this))
 {
     m_info->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
@@ -184,6 +237,8 @@ SoundBankView::SoundBankView(QWidget* parent)
     m_list->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_list->header()->setStretchLastSection(false);
     connect(m_list, &QTreeWidget::itemActivated, this, &SoundBankView::playSelected);
+    m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_list, &QWidget::customContextMenuRequested, this, &SoundBankView::showContextMenu);
 
     using TI = QIcon::ThemeIcon;
     m_play->setIcon(icons::theme(TI::MediaPlaybackStart, QStyle::SP_MediaPlay));
@@ -194,7 +249,12 @@ SoundBankView::SoundBankView(QWidget* parent)
     m_exportButton->setText(tr("Export WAV…"));
     m_exportButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     m_exportButton->setToolTip(tr("Save the selected sounds (or all) as .wav files"));
-    for (QToolButton* b : {m_play, m_stop, m_exportButton})
+    m_replaceButton->setIcon(icons::theme(TI::DocumentRevert, QStyle::SP_BrowserReload));
+    m_replaceButton->setText(tr("Replace Sound…"));
+    m_replaceButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_replaceButton->setToolTip(tr("Replace the selected sound with a .wav file of your own (needs Edit Mode)"));
+    m_replaceButton->hide();
+    for (QToolButton* b : {m_play, m_stop, m_exportButton, m_replaceButton})
         b->setAutoRaise(true);
     m_loop->setToolTip(tr("Repeat the sound (Blur marks looping sounds in the Loop column)"));
     m_position->setRange(0, 1000);
@@ -205,6 +265,7 @@ SoundBankView::SoundBankView(QWidget* parent)
     top->setContentsMargins(8, 4, 8, 4);
     top->addWidget(m_info, 1);
     top->addWidget(m_exportButton);
+    top->addWidget(m_replaceButton);
 
     auto* controls = new QHBoxLayout;
     controls->setContentsMargins(8, 4, 8, 6);
@@ -266,6 +327,45 @@ SoundBankView::SoundBankView(QWidget* parent)
             m_info->setText(m_export->result());
     });
     connect(m_exportButton, &QToolButton::clicked, this, &SoundBankView::exportSounds);
+    connect(m_replaceButton, &QToolButton::clicked, this, [this] {
+        if (const int index = currentSound(); index >= 0)
+            emit replaceSoundRequested(index);
+    });
+    connect(m_list, &QTreeWidget::itemSelectionChanged, this,
+            [this] { m_replaceButton->setEnabled(m_list->selectedItems().size() == 1); });
+}
+
+void SoundBankView::setReplaceable(bool on)
+{
+    m_replaceButton->setVisible(on);
+}
+
+void SoundBankView::showContextMenu(const QPoint& pos)
+{
+    QTreeWidgetItem* item = m_list->itemAt(pos);
+    if (!m_bank || !item)
+        return;
+    if (!item->isSelected())
+        m_list->setCurrentItem(item);
+    using TI = QIcon::ThemeIcon;
+    QMenu menu(this);
+    QAction* play = menu.addAction(icons::theme(TI::MediaPlaybackStart, QStyle::SP_MediaPlay), tr("&Play"));
+    connect(play, &QAction::triggered, this, &SoundBankView::playSelected);
+    menu.setDefaultAction(play);
+    menu.addSeparator();
+    const int selected = static_cast<int>(m_list->selectedItems().size());
+    QAction* exportWav = menu.addAction(icons::theme(TI::DocumentSaveAs, QStyle::SP_DialogSaveButton),
+                                        tr("&Export %n Sound(s) as WAV…", nullptr, selected));
+    connect(exportWav, &QAction::triggered, this, &SoundBankView::exportSounds);
+    if (m_replaceButton->isVisible()) {
+        QAction* replace = menu.addAction(icons::theme(TI::DocumentRevert, QStyle::SP_BrowserReload),
+                                          tr("&Replace with WAV…"));
+        replace->setEnabled(selected == 1);
+        connect(replace, &QAction::triggered, this, [this, index = item->data(0, Qt::UserRole).toInt()] {
+            emit replaceSoundRequested(index);
+        });
+    }
+    menu.exec(m_list->viewport()->mapToGlobal(pos));
 }
 
 SoundBankView::~SoundBankView()
@@ -379,14 +479,15 @@ void SoundBankView::exportSounds()
     m_export->setFuture(QtConcurrent::run([bank, keep, indices, target]() -> QString {
         int written = 0;
         QStringList errors;
+        // The same names Export/Import use, so edited files can be imported back.
+        const auto names = audio::soundFileNames(bank->sounds());
         for (const int i : indices) {
-            const SoundInfo& info = bank->sounds()[static_cast<std::size_t>(i)];
             auto clip = bank->decode(static_cast<std::size_t>(i));
             if (!clip) {
                 errors << toQString(clip.error().message);
                 continue;
             }
-            const auto file = target / sanitizeRelativePath(info.name + ".wav");
+            const auto file = target / toPath(toQString(names[static_cast<std::size_t>(i)] + ".wav"));
             if (auto ok = writeFile(file, audio::encodeWav(*clip)); ok)
                 ++written;
             else

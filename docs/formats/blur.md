@@ -168,7 +168,14 @@ Chunk file: `Texture { Header, Data }`.
 | 24 | u32 | unknown (3 in all samples) 🟡 |
 | 28 | … | surface data, mip 0 first |
 
-Observed mix: DXT1 75%, DXT5 22%, A8R8G8B8, DXT3, A8.
+Observed mix: DXT1 75%, DXT5 22%, A8R8G8B8, DXT3, A8. Every texture is one layer
+(`depth` 1) and stores either a full mip chain down to 1×1 or a single level; the
+`Header` chunk payload is 8 bytes (`0`, then `0` or `1`).
+
+**Writing** (`TextureDecoder::rebuild`): the chunks are rewritten in order, `Header`
+copied and `Data` replaced (new size, mip count and format; the unknown value and
+the `3` kept). All 321 textures in the game's archives rebuild byte for byte from
+their own pixels (`tests/test_blur_media.cpp`).
 
 ## `.baf` — "BANK" audio bank ✅
 
@@ -188,6 +195,15 @@ header byte `filter << 4 | shift`, then 32 bytes = 64 samples, low nibble first.
 `sample = nibble · 4096 · 2^-shift + h1·c1 + h2·c2` with float history and the filters
 {0,0}, {0.9375,0}, {1.796875,−0.8125}, {1.53125,−0.859375}, {1.90625,−0.9375}.
 Stereo alternates channels frame by frame.
+
+Sound data follows the records, in record order: `"DATA"`, u32 (size + 8), then the
+bytes the record's +44 offset points at. Banks inside `root_streaming.pak` pad with
+zeros so that each `"DATA"` starts 8 bytes before a 0x800 boundary, and pad the whole
+file to 0x800. **Writing** (`BafFormat::rebuild`) re-encodes replaced sounds (type 7:
+ADPCM — each frame tries the five filters with shifts around the best fit, simulating
+the float-history decoder; type 3 stays PCM), patches rate / frames / channels and the
+offset / size fields, and lays the data out the same way. All 193 banks in the game's
+archives rebuild byte for byte when nothing is replaced.
 
 ## `.model` geometry 🟡
 

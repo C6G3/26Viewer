@@ -3,6 +3,7 @@
 
 #include "games/GameModules.hpp"
 #include "viewer/core/GameRegistry.hpp"
+#include "viewer/core/Mesh.hpp"
 #include "viewer/core/RandomAccessFile.hpp"
 #include "viewer/core/Vfs.hpp"
 
@@ -278,27 +279,6 @@ int cmdBackup(const fs::path& file)
     return 0;
 }
 
-/// Wavefront OBJ text for a mesh's most detailed level (for checking geometry in any 3D tool).
-std::string toObj(const Mesh& mesh)
-{
-    std::string out;
-    // OBJ is right-handed: mirror x of left-handed (Direct3D) models and swap the winding.
-    const float sx = mesh.leftHanded ? -1.0f : 1.0f;
-    for (std::size_t v = 0; v < mesh.vertexCount(); ++v)
-        out += std::format("v {} {} {}\n", sx * mesh.positions[3 * v], mesh.positions[3 * v + 1], mesh.positions[3 * v + 2]);
-    for (const Mesh::Part& part : mesh.parts) {
-        if (part.shadow || part.lods.empty())
-            continue;
-        out += std::format("g {}_{}\n", part.name, part.material.empty() ? "" : part.material.substr(part.material.rfind(' ') + 1));
-        const Mesh::Range& range = part.lods.front();
-        for (std::uint32_t i = range.firstIndex; i + 2 < range.firstIndex + range.indexCount; i += 3) {
-            const std::uint32_t b = mesh.leftHanded ? i + 2 : i + 1, c = mesh.leftHanded ? i + 1 : i + 2;
-            out += std::format("f {} {} {}\n", mesh.indices[i] + 1, mesh.indices[b] + 1, mesh.indices[c] + 1);
-        }
-    }
-    return out;
-}
-
 int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& outDir)
 {
     Session s;
@@ -366,7 +346,7 @@ int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& 
             if (!outDir.empty()) {
                 fs::path dest = outDir / sanitizeRelativePath(node->virtualPath());
                 dest.replace_extension(".obj");
-                const std::string obj = toObj(*mesh);
+                const std::string obj = mesh::toObj(*mesh);
                 if (auto ok = writeFile(dest, asBytes(obj)); !ok)
                     report(ok.error().message);
             }

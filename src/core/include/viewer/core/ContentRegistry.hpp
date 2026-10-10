@@ -30,6 +30,30 @@ public:
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual bool canDecode(std::string_view extension, ByteSpan data) const = 0;
     [[nodiscard]] virtual Result<Image> decode(ByteSpan data) const = 0;
+
+    /// The stored pixels, unconverted (used to export a lossless .dds).
+    [[nodiscard]] virtual Result<image::Surfaces> surfaces(ByteSpan data) const
+    {
+        (void)data;
+        return std::unexpected(Error{ErrorCode::Unsupported, "this texture's pixels can't be read directly"});
+    }
+    /// Whether rebuild() is supported (pictures can be imported into this type).
+    [[nodiscard]] virtual bool canRebuild() const noexcept { return false; }
+    /// Pixel formats a picture imported into this texture can be stored in
+    /// (the game's choices). Empty: importing isn't supported.
+    [[nodiscard]] virtual std::vector<image::PixelFormat> importFormats(ByteSpan data) const
+    {
+        (void)data;
+        return {};
+    }
+    /// A copy of the texture file `original` holding `surfaces` instead of its
+    /// pixels; everything else in the file stays as it was.
+    [[nodiscard]] virtual Result<ByteBuffer> rebuild(ByteSpan original, const image::Surfaces& surfaces) const
+    {
+        (void)original;
+        (void)surfaces;
+        return std::unexpected(Error{ErrorCode::Unsupported, "this texture format can't be written yet"});
+    }
 };
 
 /// Breaks a file into a tree of labelled regions (chunk formats, headers...).

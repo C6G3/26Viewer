@@ -63,5 +63,10 @@ namespace mesh {
 /// IEEE 754 half precision → float.
 [[nodiscard]] float halfToFloat(std::uint16_t h) noexcept;
 
+/// Wavefront .obj text for the most detailed level (shadow hulls left out),
+/// one group per part ("name_material"). Left-handed models are mirrored so
+/// they open the right way round in Blender and other right-handed tools.
+[[nodiscard]] std::string toObj(const Mesh& mesh);
+
 } // namespace mesh
 } // namespace viewer

@@ -12,12 +12,16 @@ qt_add_executable(viewer_app WIN32
     BackupBanner.hpp
     Extractor.cpp
     Extractor.hpp
+    Exporter.cpp
+    Exporter.hpp
     FolderView.cpp
     FolderView.hpp
     GamePickerDialog.cpp
     GamePickerDialog.hpp
     Icons.cpp
     Icons.hpp
+    ImportExportDialogs.cpp
+    ImportExportDialogs.hpp
     MainWindow.cpp
     MainWindow.hpp
     PreviewWindow.cpp

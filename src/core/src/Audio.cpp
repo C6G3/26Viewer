@@ -1,7 +1,10 @@
 #include "viewer/core/Audio.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <format>
+#include <map>
 
 namespace viewer::audio {
 
@@ -73,6 +76,30 @@ public:
 };
 
 } // namespace
+
+std::vector<std::string> soundFileNames(std::span<const SoundInfo> sounds)
+{
+    std::vector<std::string> names;
+    std::map<std::string, int> seen; // lower-case name -> times used (Windows names ignore case)
+    for (std::size_t i = 0; i < sounds.size(); ++i) {
+        std::string name;
+        for (char c : sounds[i].name)
+            name += (static_cast<unsigned char>(c) < 32 || std::string_view("<>:\"/\\|?*").find(c) != std::string_view::npos)
+                        ? '_'
+                        : c;
+        while (!name.empty() && (name.back() == ' ' || name.back() == '.'))
+            name.pop_back(); // Windows drops these
+        if (name.empty())
+            name = std::format("sound_{}", i + 1);
+        std::string key = name;
+        for (char& c : key)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (const int n = ++seen[key]; n > 1)
+            name += std::format("_{}", n);
+        names.push_back(std::move(name));
+    }
+    return names;
+}
 
 ByteBuffer encodeWav(const AudioClip& clip)
 {

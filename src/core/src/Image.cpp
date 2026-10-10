@@ -233,6 +233,52 @@ std::size_t surfaceSize(PixelFormat format, std::uint32_t width, std::uint32_t h
     return static_cast<std::size_t>(width) * height * bytesPerPixel(format);
 }
 
+bool isCompressed(PixelFormat format) noexcept
+{
+    return isBlockCompressed(format);
+}
+
+std::size_t chainSize(PixelFormat format, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount) noexcept
+{
+    std::size_t total = 0;
+    for (std::uint32_t m = 0; m < mipCount; ++m) {
+        total += surfaceSize(format, width, height);
+        width = std::max(1u, width / 2);
+        height = std::max(1u, height / 2);
+    }
+    return total;
+}
+
+std::uint32_t fullMipCount(std::uint32_t width, std::uint32_t height) noexcept
+{
+    std::uint32_t levels = 1;
+    for (std::uint32_t size = std::max(width, height); size > 1; size /= 2)
+        ++levels;
+    return levels;
+}
+
+std::uint32_t toD3DFormat(PixelFormat format) noexcept
+{
+    switch (format) {
+    case PixelFormat::BC1: return fourcc('D', 'X', 'T', '1');
+    case PixelFormat::BC2: return fourcc('D', 'X', 'T', '3');
+    case PixelFormat::BC3: return fourcc('D', 'X', 'T', '5');
+    case PixelFormat::BC4: return fourcc('A', 'T', 'I', '1');
+    case PixelFormat::BC5: return fourcc('A', 'T', 'I', '2');
+    case PixelFormat::R8G8B8: return 20;
+    case PixelFormat::A8R8G8B8: return 21;
+    case PixelFormat::X8R8G8B8: return 22;
+    case PixelFormat::R5G6B5: return 23;
+    case PixelFormat::A1R5G5B5: return 25;
+    case PixelFormat::A4R4G4B4: return 26;
+    case PixelFormat::A8: return 28;
+    case PixelFormat::A8B8G8R8: return 32;
+    case PixelFormat::L8: return 50;
+    case PixelFormat::A8L8: return 51;
+    }
+    return 0;
+}
+
 std::optional<PixelFormat> fromD3DFormat(std::uint32_t v) noexcept
 {
     switch (v) {
@@ -281,7 +327,7 @@ Result<Image> decodeSurface(ByteSpan pixels, PixelFormat format, std::uint32_t w
     return img;
 }
 
-Result<Image> decodeDds(ByteSpan file)
+Result<Surfaces> readDds(ByteSpan file)
 {
     constexpr std::size_t kHeader = 128;
     if (file.size() < kHeader || loadScalar<std::uint32_t>(file, 0) != fourcc('D', 'D', 'S', ' '))
@@ -353,12 +399,42 @@ Result<Image> decodeDds(ByteSpan file)
         return fail(ErrorCode::Unsupported, "unsupported DDS pixel format (flags {:#x}, fourcc {:#010x}, {} bpp)",
                     pfFlags, fcc, bitCount);
 
-    auto img = decodeSurface(file.subspan(dataOffset), *format, width, height);
+    if (width == 0 || height == 0 || width > 16384 || height > 16384)
+        return fail(ErrorCode::InvalidFormat, "invalid image size {}x{}", width, height);
+
+    Surfaces s;
+    s.format = *format;
+    s.width = width;
+    s.height = height;
+    s.layers = layers;
+    const ByteSpan pixels = file.subspan(dataOffset);
+    // Keep the mip levels the file really holds (some writers over-report).
+    s.mipCount = std::min(mips, fullMipCount(width, height));
+    while (s.mipCount > 1 && chainSize(*format, width, height, s.mipCount) * layers > pixels.size())
+        --s.mipCount;
+    if (s.mipCount == 1 && chainSize(*format, width, height, 1) * layers > pixels.size())
+        s.layers = 1; // a short cube map: show its first face
+    const std::size_t size = chainSize(*format, width, height, s.mipCount) * s.layers;
+    if (pixels.size() < size)
+        return fail(ErrorCode::OutOfBounds, "{} surface {}x{} needs {} bytes, have {}", pixelFormatName(*format), width,
+                    height, size, pixels.size());
+    s.data.assign(pixels.begin(), pixels.begin() + static_cast<std::ptrdiff_t>(size));
+    return s;
+}
+
+Result<Image> decodeDds(ByteSpan file)
+{
+    auto s = readDds(file);
+    if (!s)
+        return std::unexpected(s.error());
+    auto img = decodeSurface(s->data, s->format, s->width, s->height);
     if (img) {
-        img->mipCount = mips;
-        img->layers = layers;
+        // Report what the file says (the header), as before.
+        img->mipCount = std::max(1u, loadScalar<std::uint32_t>(file, 28));
+        img->layers = s->layers;
     }
     return img;
 }
+
 
 } // namespace viewer::image

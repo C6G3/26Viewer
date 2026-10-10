@@ -36,18 +36,27 @@ system, image decoders, the UI — is shared by every future game module.
   tab (compression, offsets, hashes…).
   - **3D models** (Blur `.model`): orbit/pan/zoom, a parts tree to switch parts on
     and off, solid / wireframe / grid / ground shadow, and a level-of-detail picker.
-  - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV.
+  - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV,
+    and (in Edit Mode) *Replace Sound…* with a `.wav` of your own.
   - **Videos** (Bink `.bik`): playback with an audio-track picker.
   - **Text** with line numbers, find, and colour coding (XML, INI, CSV, JSON, Lua,
     shaders, QuickBMS). *Edit* opens a text editor; saving goes through Edit Mode.
 - **Extraction** of a selection or everything, on a background thread with
   progress and cancel; paths are sanitised so archives can never write outside
   the chosen folder.
+- **Export** (`Ctrl+Alt+E`) writes *converted* copies: sound banks → a folder of
+  `.wav` files, models → `.obj`, textures → `.png`, `.dds`, `.jpg` or `.bmp`
+  (you choose; `.dds` keeps the game's own compressed pixels for re-importing).
 - **Edit Mode** (like OpenIV): off at every start; turning it on (`Ctrl+M`)
   asks for confirmation and shows a red **EDIT MODE** badge. Only then can you:
   - **Replace assets** with your own files — *Edit ▸ Replace…* (`Ctrl+R`), the
     toolbar button, or drag a file from Explorer onto an item. The file type must
     match; the name inside the archive never changes.
+  - **Import** (`Ctrl+I`) — the reverse of Export: a folder of `.wav` files
+    rebuilds a sound bank (files are matched to sounds by name; missing ones stay
+    as they were), and a `.png` / `.dds` / `.jpg` / `.bmp` picture becomes a
+    texture, compressed to the DXT version you pick (the game's original is the
+    default) with mip-maps made like the original's.
   - **Back up** explicitly: items in an archive without a backup show a red
     *"not backed up"* banner with a **Back Up Now** button (saves
     `<archive>.bak`). Replacing offers *Back Up & Replace*; nothing is backed up

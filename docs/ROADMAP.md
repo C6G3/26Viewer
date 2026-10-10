@@ -42,7 +42,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Previews open in their own windows (toolbar for per-file tools, drop-to-replace)
    - [x] Game's .exe icon on the tree's top node; optional files in the tree
    - [x] Open archives / any folder alongside the game (extra top-level entries, remembered per game)
-   - [ ] Per-file tools in the preview window: image channels, mip selector, export PNG
+   - [x] Per-file Export / Import buttons in the preview window
+   - [ ] Per-file tools in the preview window: image channels, mip selector
 4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
    - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
    - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups
@@ -51,7 +52,9 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 5. [ ] Status-bar breadcrumb and "Go to path…" (`Ctrl+L`) using `MainWindow::selectPath`
 6. [ ] Hex view: selection, copy as hex/C array, go-to-offset, find bytes
 7. [ ] Image view: channel toggles (R/G/B/A), mip selector, export as PNG
-8. [ ] Export converted formats: `.texture` → `.dds`/`.png` on extraction (option)
+8. [x] Export converted formats (sound banks → .wav folders, models → .obj, textures →
+   .png/.dds/.jpg/.bmp) and Import back (.wav folder → bank, picture → texture with DXT1/3/5
+   or uncompressed, the original format by default; DXT encoder in core)
 9. [ ] Parallel extraction (several files at once; archives already support concurrent reads)
 10. [ ] Settings dialog (default extract folder, preview size limits)
 11. [ ] Release workflow: tag → CI builds `dist/release` → zip attached to a GitHub Release
@@ -61,7 +64,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 1. [ ] `ARCH` `.levelstream` archives (loose in `levels/`) → new `ArchiveFormat`
 2. [x] `.model` geometry: vertex/index buffers, all LODs, shadow hulls (see docs/formats/blur.md); next: part names, materials, UVs
 3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL); next: textures and game-accurate shading
-4. [x] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia); next: import WAVs / replace sounds
+4. [x] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia); import WAV folders and
+   replace single sounds (ADPCM encoder; every game bank rebuilds byte for byte)
 4b. [x] Bink `.bik` video playback (Qt Multimedia FFmpeg backend), audio track picker
 4c. [x] Text viewer/editor: colour coding (XML, INI, CSV, JSON, Lua, shaders, QuickBMS), encodings round-trip, saving through Edit Mode
 5. [ ] Data tables (`.bin`, `.loc`, `.xt`) → table view

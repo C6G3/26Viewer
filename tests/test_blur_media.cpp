@@ -4,6 +4,7 @@
 #include "TestUtil.hpp"
 
 #include "BafBank.hpp"
+#include "ChunkFile.hpp"
 #include "ModelDecoder.hpp"
 #include "PakArchive.hpp"
 
@@ -12,6 +13,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -37,7 +39,8 @@ void putName(test::Writer& w, std::string_view name, std::size_t size)
     w.put(padded);
 }
 
-/// BANK with one 4-bit ADPCM sound (type 7) and one PCM16 sound (type 3).
+/// BANK with one 4-bit ADPCM sound (type 7) and one PCM16 sound (type 3),
+/// laid out like the game's banks ("DATA" + size + 8 before each sound's data).
 ByteBuffer buildBank(const ByteBuffer& adpcm, std::uint16_t channels, std::uint32_t frames, const ByteBuffer& pcm)
 {
     test::Writer w;
@@ -49,7 +52,8 @@ ByteBuffer buildBank(const ByteBuffer& adpcm, std::uint16_t channels, std::uint3
     putName(w, "TestBank", 32);
     w.bytes.resize(0x34);
 
-    const std::uint32_t dataStart = 0x34 + 76 + 80;
+    const std::uint32_t recordsEnd = 0x34 + 76 + 80;
+    const std::uint32_t dataStart = recordsEnd + 8;
     // type 7
     w.put("WAVE");
     w.put<std::uint32_t>(76);
@@ -70,7 +74,7 @@ ByteBuffer buildBank(const ByteBuffer& adpcm, std::uint16_t channels, std::uint3
     w.put<std::uint32_t>(80);
     w.put<std::uint32_t>(3);
     putName(w, "sync", 32);
-    w.put<std::uint32_t>(dataStart + static_cast<std::uint32_t>(adpcm.size()));
+    w.put<std::uint32_t>(dataStart + static_cast<std::uint32_t>(adpcm.size()) + 8);
     w.put<std::uint32_t>(static_cast<std::uint32_t>(pcm.size()));
     w.put<std::uint32_t>(0x3F800000);
     w.put<std::uint32_t>(25);
@@ -79,8 +83,12 @@ ByteBuffer buildBank(const ByteBuffer& adpcm, std::uint16_t channels, std::uint3
     w.put<std::uint32_t>(2);
     w.put<std::uint32_t>(0);
     w.put<std::uint32_t>(0xFF);
-    REQUIRE(w.bytes.size() == dataStart);
+    REQUIRE(w.bytes.size() == recordsEnd);
+    w.put("DATA");
+    w.put<std::uint32_t>(static_cast<std::uint32_t>(adpcm.size() + 8));
     w.put(adpcm);
+    w.put("DATA");
+    w.put<std::uint32_t>(static_cast<std::uint32_t>(pcm.size() + 8));
     w.put(pcm);
     return w.bytes;
 }
@@ -124,6 +132,101 @@ TEST_CASE("Blur ADPCM decodes nibbles, filters and stereo frames")
     {
         CHECK(baf::decodeAdpcm(adpcmFrame(0, 0, 0x11), 1, 10).size() == 10);
     }
+}
+
+namespace {
+
+/// A test tone (interleaved; the right channel is a fifth higher).
+std::vector<std::int16_t> tone(std::uint32_t rate, std::uint16_t channels, std::size_t frames)
+{
+    std::vector<std::int16_t> s(frames * channels);
+    for (std::size_t i = 0; i < frames; ++i)
+        for (std::uint16_t c = 0; c < channels; ++c)
+            s[i * channels + c] = static_cast<std::int16_t>(
+                12000.0 * std::sin(2.0 * 3.14159265358979 * (440.0 * (1 + 0.5 * c)) * static_cast<double>(i) / rate));
+    return s;
+}
+
+/// Error relative to the signal (0 = identical).
+double relativeError(const std::vector<std::int16_t>& a, const std::vector<std::int16_t>& b)
+{
+    double signal = 0, noise = 0;
+    for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+        signal += static_cast<double>(a[i]) * a[i];
+        noise += (static_cast<double>(a[i]) - b[i]) * (static_cast<double>(a[i]) - b[i]);
+    }
+    return signal > 0 ? std::sqrt(noise / signal) : 1.0;
+}
+
+} // namespace
+
+TEST_CASE("Blur ADPCM encoding plays back close to the original")
+{
+    for (std::uint16_t channels : {1, 2}) {
+        const auto input = tone(44100, channels, 10000); // not a multiple of 64 frames
+        const ByteBuffer encoded = baf::encodeAdpcm(input, channels);
+        CHECK(encoded.size() == (10000 + 63) / 64 * channels * 33);
+        const auto decoded = baf::decodeAdpcm(encoded, channels, 10000);
+        REQUIRE(decoded.size() == input.size());
+        CHECK(relativeError(input, decoded) < 0.02); // ≈ 34 dB or better
+    }
+    const ByteBuffer silence = baf::encodeAdpcm(std::vector<std::int16_t>(64, 0), 1);
+    CHECK(baf::decodeAdpcm(silence, 1, 64) == std::vector<std::int16_t>(64, 0));
+}
+
+TEST_CASE("Blur audio banks rebuild unchanged, and with replaced sounds")
+{
+    const ByteBuffer adpcm = baf::encodeAdpcm(tone(48000, 1, 640), 1);
+    const ByteBuffer pcm = test::sampleData(400);
+    const ByteBuffer file = buildBank(adpcm, 1, 640, pcm);
+    const BafFormat format;
+
+    // Nothing replaced: byte for byte the same file.
+    auto same = format.rebuild(file, {});
+    REQUIRE(same);
+    CHECK(*same == file);
+
+    // Sound 1 becomes a stereo 22 kHz clip; the PCM sound stays as it was.
+    std::vector<std::optional<AudioClip>> replacements(2);
+    replacements[0] = AudioClip{22050, 2, tone(22050, 2, 3000)};
+    auto rebuilt = format.rebuild(file, replacements);
+    REQUIRE(rebuilt);
+    auto bank = format.open(memorySource(*rebuilt));
+    REQUIRE(bank);
+    const auto sounds = (*bank)->sounds();
+    REQUIRE(sounds.size() == 2);
+    CHECK(sounds[0].name == "engine_loop");
+    CHECK(sounds[0].sampleRate == 22050);
+    CHECK(sounds[0].channels == 2);
+    CHECK(sounds[0].frames == 3000);
+    CHECK(sounds[0].looped); // settings are kept
+    const auto clip = (*bank)->decode(0);
+    REQUIRE(clip);
+    CHECK(relativeError(replacements[0]->samples, clip->samples) < 0.02);
+    CHECK((*bank)->decode(1)->samples == (*format.open(memorySource(file)))->decode(1)->samples);
+
+    // A PCM sound is replaced with PCM.
+    std::vector<std::optional<AudioClip>> pcmOnly(2);
+    pcmOnly[1] = AudioClip{48000, 1, {1, 2, 3, 4}};
+    auto withPcm = format.rebuild(file, pcmOnly);
+    REQUIRE(withPcm);
+    CHECK((*format.open(memorySource(*withPcm)))->decode(1)->samples == std::vector<std::int16_t>{1, 2, 3, 4});
+
+    // Too many replacements, or not a bank at all.
+    CHECK_FALSE(format.rebuild(file, std::vector<std::optional<AudioClip>>(3)));
+    CHECK_FALSE(format.rebuild(test::sampleData(100), {}));
+}
+
+TEST_CASE("Exported sound file names are safe and unique")
+{
+    std::vector<SoundInfo> sounds(5);
+    sounds[0].name = "engine/idle";
+    sounds[1].name = "Engine/Idle"; // same name, other case
+    sounds[2].name = "";
+    sounds[3].name = "loop. ";
+    sounds[4].name = "a:b*c?";
+    CHECK(audio::soundFileNames(sounds)
+          == std::vector<std::string>{"engine_idle", "Engine_Idle_2", "sound_3", "loop", "a_b_c_"});
 }
 
 TEST_CASE("Blur audio banks list and decode their sounds")
@@ -419,4 +522,76 @@ TEST_CASE("Every real Blur text file survives load + save byte for byte (set BLU
         }
     }
     CHECK(checked > 400); // 480 event tables, the UTF-16 .txt files and the bank list
+}
+
+TEST_CASE("Every real Blur audio bank rebuilds byte for byte (set BLUR_DIR to enable)")
+{
+    const char* dir = std::getenv("BLUR_DIR");
+    if (!dir) {
+        SUCCEED("BLUR_DIR not set; skipping");
+        return;
+    }
+    std::size_t checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(dir) / "cache")) {
+        if (entry.path().extension() != ".pak")
+            continue;
+        auto pak = PakArchive::open(entry.path());
+        REQUIRE(pak);
+        const auto entries = (*pak)->entries();
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (extensionOf(entries[i].path) != "baf")
+                continue;
+            const ByteBuffer original = (*pak)->read(i).value();
+            INFO(entries[i].path);
+            auto rebuilt = BafFormat().rebuild(original, {});
+            REQUIRE(rebuilt);
+            CHECK(*rebuilt == original);
+            ++checked;
+        }
+    }
+    CHECK(checked >= 193); // every bank in the game's archives
+}
+
+TEST_CASE("Every real Blur texture rebuilds byte for byte (set BLUR_DIR to enable)")
+{
+    const char* dir = std::getenv("BLUR_DIR");
+    if (!dir) {
+        SUCCEED("BLUR_DIR not set; skipping");
+        return;
+    }
+    const TextureDecoder decoder;
+    std::size_t checked = 0, dds = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(dir) / "cache")) {
+        if (entry.path().extension() != ".pak")
+            continue;
+        auto pak = PakArchive::open(entry.path());
+        REQUIRE(pak);
+        const auto entries = (*pak)->entries();
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            const std::string ext = extensionOf(entries[i].path);
+            if (ext != "texture" && ext != "dds")
+                continue;
+            const ByteBuffer original = (*pak)->read(i).value();
+            INFO(entries[i].path);
+            if (ext == "dds") { // plain .dds: the pixels read back as they were written
+                auto s = image::readDds(original);
+                REQUIRE(s);
+                if (s->layers != 1 && s->layers != 6)
+                    continue; // volume textures (colour look-up tables) aren't written
+                auto written = image::writeDds(*s);
+                REQUIRE(written);
+                CHECK(image::readDds(*written)->data == s->data);
+                ++dds;
+                continue;
+            }
+            auto surfaces = decoder.surfaces(original);
+            REQUIRE(surfaces);
+            auto rebuilt = decoder.rebuild(original, *surfaces);
+            REQUIRE(rebuilt);
+            CHECK(*rebuilt == original);
+            ++checked;
+        }
+    }
+    CHECK(checked >= 321); // every .texture in the game's archives
+    CHECK(dds > 0);
 }

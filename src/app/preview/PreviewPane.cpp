@@ -52,6 +52,7 @@ struct PreviewResult {
     QString meshError;
 
     std::shared_ptr<const SoundBank> bank;
+    bool bankRebuildable = false; ///< Its sounds can be replaced (not a plain .wav).
     QString bankError;
 
     bool isVideo = false;
@@ -119,6 +120,7 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
         const ByteSpan header = ByteSpan(*head).first(std::min<std::size_t>(head->size(), 4096));
         if (type.category == FileCategory::Audio) {
             if (const SoundBankFormat* format = session->content.findSoundBankFormat(ext, header)) {
+                r->bankRebuildable = format->canRebuild() && ext != "wav";
                 if (auto bank = format->open(*source))
                     r->bank = std::shared_ptr<const SoundBank>(std::move(*bank));
                 else
@@ -243,6 +245,7 @@ PreviewPane::PreviewPane(QWidget* parent)
     // Previews are read-only; "Edit" opens the file in a TextEditorWindow.
     m_text->setEditButtonVisible(true);
     connect(m_text, &TextView::editRequested, this, &PreviewPane::editRequested);
+    connect(m_bankView, &SoundBankView::replaceSoundRequested, this, &PreviewPane::replaceSoundRequested);
     m_previewStack->addWidget(m_message);
     m_previewStack->addWidget(m_image);
     m_previewStack->addWidget(m_text);
@@ -388,6 +391,7 @@ void PreviewPane::applyResult(const PreviewResult& result)
         hasPreview = false;
     } else if (result.bank) {
         m_bankView->setBank(result.bank, m_session);
+        m_bankView->setReplaceable(result.bankRebuildable && m_node && Vfs::canReplace(*m_node));
         m_previewStack->setCurrentWidget(m_bankView);
     } else if (result.isVideo && (!result.videoFile.isEmpty() || !result.videoData.isEmpty())) {
         if (!result.videoFile.isEmpty())

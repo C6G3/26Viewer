@@ -50,6 +50,11 @@ public:
     std::string_view name() const noexcept override { return "Blur texture"; }
     bool canDecode(std::string_view extension, ByteSpan data) const override;
     Result<Image> decode(ByteSpan data) const override;
+    /// Blur textures are DXT1 / DXT3 / DXT5 / A8R8G8B8 (and a few A8 masks).
+    Result<image::Surfaces> surfaces(ByteSpan data) const override;
+    bool canRebuild() const noexcept override { return true; }
+    std::vector<image::PixelFormat> importFormats(ByteSpan data) const override;
+    Result<ByteBuffer> rebuild(ByteSpan original, const image::Surfaces& surfaces) const override;
 };
 
 } // namespace viewer::games::blur

@@ -20,6 +20,7 @@ struct ExtractItem {
 struct ExtractSummary {
     int written = 0;
     int failed = 0;
+    int converted = 0; ///< Export: files written in another format (.wav, .obj, .png...).
     std::uint64_t bytes = 0;
     bool canceled = false;
     QStringList errors; ///< First few failures, for the report dialog.

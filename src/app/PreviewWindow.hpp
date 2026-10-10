@@ -43,6 +43,8 @@ public:
     /// Checks a file dropped on the window: returns why it can't replace this
     /// window's file, or an empty string if it can.
     void setDropCheck(std::function<QString(const QString& file)> check) { m_dropCheck = std::move(check); }
+    /// Whether Import… applies to a node (in Edit Mode).
+    void setImportCheck(std::function<bool(const VfsNode*)> check) { m_importCheck = std::move(check); }
 
 signals:
     /// Replace this window's file with `file` (empty: ask for one).
@@ -53,6 +55,11 @@ signals:
     void backupRequested();
     /// "Edit" on a text preview: open this file in the text editor.
     void editRequested();
+    /// Sound `index` of the shown bank should be replaced by a .wav file.
+    void replaceSoundRequested(int index);
+    /// The Export… / Import… buttons.
+    void exportRequested();
+    void importRequested();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -72,6 +79,9 @@ private:
     QAction* m_revealAction;
     QAction* m_extractAction;
     QAction* m_replaceAction;
+    QAction* m_exportAction;
+    QAction* m_importAction;
+    std::function<bool(const VfsNode*)> m_importCheck;
 };
 
 } // namespace viewer::app

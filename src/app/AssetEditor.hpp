@@ -26,6 +26,7 @@ struct ReplacePlan {
     QString sourceFile;
     ByteBuffer data;
     QString warning; ///< Non-fatal concern to confirm (e.g. "doesn't decode as a texture").
+    QStringList notes; ///< Extra facts shown when confirming (e.g. "3 sounds replaced, 40 kept").
     bool backupFirst = false; ///< Save the original as .bak before writing.
 };
 
