@@ -155,13 +155,26 @@ Result<int> exportOne(const Session& session, const ExtractItem& item, const std
     if (!data)
         return std::unexpected(data.error());
 
-    // Model → .obj
+    // Model → .obj, and the textures stored in it → <name>_textures/*.png
     if (const MeshDecoder* decoder = session.content.findMeshDecoder(ext, *data)) {
         if (auto mesh = decoder->decode(*data)) {
             const std::string obj = mesh::toObj(*mesh);
             if (auto ok = writeFile(outputDir / withExtension(relative, ".obj"), asBytes(obj)); !ok)
                 return std::unexpected(ok.error());
-            return 1;
+            int written = 1;
+            if (!mesh->textures.empty()) {
+                std::filesystem::path folder = outputDir / withExtension(relative, "");
+                folder += "_textures";
+                std::error_code ec;
+                std::filesystem::create_directories(folder, ec);
+                for (const Mesh::Texture& t : mesh->textures) {
+                    const auto file = folder / sanitizeRelativePath(t.name + ".png");
+                    if (!toQImage(t.image).save(toQString(file), "PNG"))
+                        return fail(ErrorCode::Io, "could not write {}", toQString(file).toStdString());
+                    ++written;
+                }
+            }
+            return written;
         }
     }
     // Texture → picture

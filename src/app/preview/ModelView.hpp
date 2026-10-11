@@ -14,7 +14,9 @@
 #include <vector>
 
 class QCheckBox;
+class QColor;
 class QComboBox;
+class QToolButton;
 class QLabel;
 class QSplitter;
 class QTreeWidget;
@@ -44,6 +46,10 @@ public:
     void setShowWireframe(bool on);
     void setShowGrid(bool on);
     void setShowShadow(bool on);
+    /// Colours parts by the game's effect (paint, glass, lights, chrome…) instead of plain grey.
+    void setShowMaterials(bool on);
+    /// Body colour for car paint (the game lets the player choose it).
+    void setPaintColor(const QColor& color);
     void resetView();
 
 protected:
@@ -75,6 +81,8 @@ private:
     bool m_wireframe = false;
     bool m_grid = true;
     bool m_shadow = true;
+    bool m_materials = true;
+    QVector3D m_paint{0.55f, 0.07f, 0.06f};
 
     QOpenGLShaderProgram m_program;
     QOpenGLBuffer m_vertices{QOpenGLBuffer::VertexBuffer};
@@ -117,6 +125,9 @@ private:
     void applyVisibility();
     void showPartsMenu(const QPoint& pos);
     void setAllParts(bool on, bool includeShadows);
+    /// Opens a texture stored in the model in its own window.
+    void showTexture(int index);
+    void updatePaintButton();
 
     std::shared_ptr<const Mesh> m_mesh;
     ModelCanvas* m_canvas;
@@ -127,6 +138,8 @@ private:
     QCheckBox* m_wireframe;
     QCheckBox* m_grid;
     QCheckBox* m_shadow;
+    QCheckBox* m_materials;
+    QToolButton* m_paint;
     QComboBox* m_lod;
     std::vector<QTreeWidgetItem*> m_partItems; ///< Per Mesh part.
     bool m_updatingTree = false;

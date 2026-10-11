@@ -36,6 +36,9 @@ system, image decoders, the UI — is shared by every future game module.
   tab (compression, offsets, hashes…).
   - **3D models** (Blur `.model`): orbit/pan/zoom, a parts tree to switch parts on
     and off, solid / wireframe / grid / ground shadow, and a level-of-detail picker.
+    *Materials* shades parts like the game's effects (car paint in a colour you pick,
+    see-through glass, lights, chrome); the textures stored in the model are listed
+    (double-click to view) and exported with the `.obj` (which has UVs and normals).
   - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV,
     and (in Edit Mode) *Replace Sound…* with a `.wav` of your own.
   - **Videos** (Bink `.bik`): playback with an audio-track picker.

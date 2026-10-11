@@ -25,6 +25,18 @@
 // geometry. Indices are triangle strips stitched with degenerate triangles, or
 // plain lists. Element 0 of a vertex is the position: 3 floats (12/16 bytes)
 // or 4 halves (8 bytes).
+//
+// Each vertex buffer is preceded by its element list: one record per element,
+// "RA" 00 00, u32 type, u32 0, u32 usage, u32 usage index. Usages are Direct3D's
+// (0 position, 3 normal, 5 texture coordinates); the type codes are the
+// engine's own: 0x06 float3, 0x07 float4, 0x08 half2, 0x09 half4, 0x0B four
+// bytes mapped to -1..1 (normals), 0x0A four bytes.
+//
+// Materials: a list of effect names ("veh_Paint_a_b_c.fx"); a draw group's
+// material number indexes it. Textures are stored in the file: full ones
+// (name, "RA" 01 00 header, hash, size, then the .texture Data layout and the
+// pixels) and streamed ones, one record per size (16x16, 32x32...) whose
+// pixels follow in a blob — the largest holds the most detailed level.
 
 #include "ModelDecoder.hpp"
 
@@ -52,7 +64,13 @@ struct VertexBuffer {
     std::uint32_t count = 0;
     std::uint32_t stride = 0;
     Blob data;
+    int normalAt = -1;       ///< Byte offset of the normal within a vertex (-1: none).
+    int uvAt = -1;           ///< Byte offset of the first texture coordinates (-1: none).
+    std::uint32_t uvType = 0;
 };
+
+// Vertex element type codes (see the comment at the top).
+constexpr std::uint32_t kFloat3 = 0x06, kFloat4 = 0x07, kHalf2 = 0x08, kHalf4 = 0x09, kUByte4N = 0x0B;
 
 struct Draw {
     std::size_t at = 0; ///< File position of the record (groups are consecutive records).
@@ -267,6 +285,138 @@ std::map<std::uint32_t, std::size_t> solveBuffers(const std::vector<VertexBuffer
 
 /// Moves a part from its element's local space into model space: its vertices
 /// are copied (other parts may share them) and transformed, p' = p * R + t.
+/// The element list in front of the vertex buffer record at `p` (n elements):
+/// where the normal and the first texture coordinates are.
+void readVertexElements(const Scanner& s, std::size_t p, std::uint32_t n, VertexBuffer& vb)
+{
+    if (p < 20 * std::size_t{n})
+        return;
+    for (std::uint32_t i = 0; i < n; ++i)
+        if (const std::size_t q = p - 20 * (n - i); !s.isRA(q, 0) || s.u32(q + 8) != 0)
+            return;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const std::size_t q = p - 20 * (n - i);
+        const auto type = s.u32(q + 4), usage = s.u32(q + 12), index = s.u32(q + 16);
+        const auto space = (i + 1 < n ? vb.offsets[i + 1] : vb.stride) - vb.offsets[i];
+        if (usage == 3 && index == 0 && type == kUByte4N && space >= 3 && vb.normalAt < 0) {
+            vb.normalAt = vb.offsets[i];
+        } else if (usage == 5 && index == 0 && vb.uvAt < 0
+                   && ((type == kHalf2 || type == kHalf4) ? space >= 4 : (type == kFloat3 || type == kFloat4) && space >= 8)) {
+            vb.uvAt = vb.offsets[i];
+            vb.uvType = type;
+        }
+    }
+}
+
+/// The material list: "RA" 00 00, u32 count, then per material an empty record
+/// and "RA" 00 00, u32 length, the effect's name. Found from its first name.
+std::vector<std::string> readShaderNames(const Scanner& s, ByteSpan d, std::size_t arch)
+{
+    const std::string_view hay(reinterpret_cast<const char*>(d.data()), d.size());
+    for (std::size_t fx = hay.find(".fx", arch); fx != std::string_view::npos; fx = hay.find(".fx", fx + 1)) {
+        // the record holding this name: "RA" 00 00, u32 length, name
+        for (std::uint32_t len = 4; len <= 64 && len <= fx + 3; ++len) {
+            const std::size_t name = fx + 3 - len;
+            if (name < arch + 16 || !s.isRA(name - 8, 0) || s.u32(name - 4) != len)
+                continue;
+            const std::size_t first = name - 8 - 4; // the empty record before it
+            if (!s.isRA(first, 0) || !s.isRA(first - 8, 0))
+                return {};
+            const std::uint32_t count = s.u32(first - 4);
+            if (count == 0 || count > 256)
+                return {};
+            std::vector<std::string> names;
+            std::size_t p = first;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                if (p + 12 > d.size() || !s.isRA(p, 0) || !s.isRA(p + 4, 0))
+                    break;
+                const std::uint32_t n = s.u32(p + 8);
+                if (n == 0 || n > 128 || p + 12 + n > d.size())
+                    break;
+                names.emplace_back(reinterpret_cast<const char*>(d.data() + p + 12), n);
+                p += 12 + n;
+            }
+            return names;
+        }
+    }
+    return {};
+}
+
+/// Every texture stored in the file, the largest size of each.
+std::vector<Mesh::Texture> readTextures(const Scanner& s, ByteSpan d, std::size_t arch)
+{
+    struct Candidate {
+        std::string name;
+        std::uint32_t width = 0, height = 0;
+        image::PixelFormat format{};
+        std::size_t pixels = 0, size = 0;
+    };
+    std::vector<Candidate> found;
+    for (std::size_t f = arch + 64; f + 28 <= d.size(); ++f) { // records aren't aligned
+        // u32 width, height, depth, mips, format, 0, 3 — find it by the last three
+        if (s.u32(f + 20) != 0 || s.u32(f + 24) != 3)
+            continue;
+        const auto format = image::fromD3DFormat(s.u32(f + 16));
+        const auto w = s.u32(f), h = s.u32(f + 4), depth = s.u32(f + 8), mips = s.u32(f + 12);
+        // the header in front: "RA" 01 00 and 12 words (full) or 13 (a streamed texture's
+        // first size: ..., hash, 1, 28); its larger sizes have just "RA" 00 00, 2, 1, 28
+        const std::size_t ra = s.isRA(f - 52, 1) ? f - 52 : s.isRA(f - 56, 1) ? f - 56 : 0;
+        const bool nextSize = !ra && s.isRA(f - 16, 0) && s.u32(f - 8) == 1 && s.u32(f - 4) == 28;
+        if (!format || w == 0 || h == 0 || w > 4096 || h > 4096 || depth != 1 || mips == 0 || mips > 13
+            || (!ra && !nextSize))
+            continue;
+        Candidate c;
+        c.width = w;
+        c.height = h;
+        c.format = *format;
+        if (s.u32(f - 4) == 28) { // streamed: the pixels follow in a blob
+            const auto blob = s.blobAt(f + 28);
+            if (!blob)
+                continue;
+            c.pixels = blob->start;
+            c.size = blob->size;
+        } else {
+            c.pixels = f + 28;
+            c.size = s.u32(f - 4) - 28;
+        }
+        if (c.pixels + c.size > d.size() || c.size < image::surfaceSize(c.format, w, h))
+            continue;
+        for (std::uint32_t len = 1; ra && len <= 64 && len + 4 <= ra; ++len) {
+            if (s.u32(ra - len - 4) != len)
+                continue;
+            std::string name(reinterpret_cast<const char*>(d.data() + ra - len), len);
+            if (std::ranges::all_of(name, [](char ch) { return ch > 32 && ch < 127; }))
+                c.name = std::move(name);
+            break;
+        }
+        // A streamed texture names only its first (smallest) record; the next
+        // sizes up follow it unnamed.
+        if (c.name.empty() && !found.empty() && found.back().format == c.format
+            && (c.width == 2 * found.back().width || c.height == 2 * found.back().height))
+            c.name = found.back().name;
+        if (c.name.empty())
+            c.name = std::format("texture {}", found.size() + 1);
+        found.push_back(std::move(c));
+    }
+    std::vector<Mesh::Texture> textures;
+    std::map<std::string, std::size_t> best; // name -> index in found of the largest
+    std::vector<std::string> order;
+    for (std::size_t i = 0; i < found.size(); ++i) {
+        auto [it, added] = best.try_emplace(found[i].name, i);
+        if (added)
+            order.push_back(found[i].name);
+        else if (std::uint64_t{found[i].width} * found[i].height
+                 > std::uint64_t{found[it->second].width} * found[it->second].height)
+            it->second = i;
+    }
+    for (const std::string& name : order) {
+        const Candidate& c = found[best[name]];
+        if (auto img = image::decodeSurface(d.subspan(c.pixels, c.size), c.format, c.width, c.height))
+            textures.push_back({name, std::move(*img)});
+    }
+    return textures;
+}
+
 void placePart(Mesh& mesh, Mesh::Part& part, const Element& e)
 {
     std::map<std::uint32_t, std::uint32_t> copies;
@@ -280,6 +430,16 @@ void placePart(Mesh& mesh, Mesh::Part& part, const Element& e)
                 mesh.positions.insert(mesh.positions.end(), {x * r[0] + y * r[3] + z * r[6] + e.position[0],
                                                              x * r[1] + y * r[4] + z * r[7] + e.position[1],
                                                              x * r[2] + y * r[5] + z * r[8] + e.position[2]});
+                // normals turn with the part (no translation); uvs are copied
+                const float nx = mesh.normals[3 * v], ny = mesh.normals[3 * v + 1], nz = mesh.normals[3 * v + 2];
+                float n[3] = {nx * r[0] + ny * r[3] + nz * r[6], nx * r[1] + ny * r[4] + nz * r[7],
+                              nx * r[2] + ny * r[5] + nz * r[8]};
+                if (const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]); len > 0)
+                    for (float& c : n)
+                        c /= len;
+                mesh.normals.insert(mesh.normals.end(), {n[0], n[1], n[2]});
+                const float u = mesh.uvs[2 * v], uv = mesh.uvs[2 * v + 1];
+                mesh.uvs.insert(mesh.uvs.end(), {u, uv});
             }
             mesh.indices[i] = it->second;
         }
@@ -318,6 +478,7 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
                     vb.stride = static_cast<std::uint32_t>(blob->size / vb.count);
                     if (vb.offsets.back() < vb.stride && vb.stride <= 256) {
                         vb.data = *blob;
+                        readVertexElements(s, p, n, vb);
                         vbs.push_back(std::move(vb));
                         p = blob->start + blob->size;
                         continue;
@@ -393,6 +554,8 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
     for (const Element& e : elements)
         mesh.nodes.push_back({e.name, e.parent});
     std::map<std::size_t, std::uint32_t> baseVertex; // vb index -> first vertex in mesh.positions
+    bool hasNormals = false, hasUvs = false; // normals/uvs stay the same length as positions until the end
+    const std::vector<std::string> shaders = readShaderNames(s, d, arch);
     const auto addVertexBuffer = [&](std::size_t vbIndex) -> std::optional<std::uint32_t> {
         if (const auto it = baseVertex.find(vbIndex); it != baseVertex.end())
             return it->second;
@@ -409,6 +572,25 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
                 if (!std::isfinite(value))
                     value = 0.0f;
                 mesh.positions.push_back(value);
+            }
+            if (vb.normalAt >= 0) {
+                for (int axis = 0; axis < 3; ++axis)
+                    mesh.normals.push_back(
+                        std::to_integer<std::uint8_t>(d[at + static_cast<std::size_t>(vb.normalAt) + axis]) / 127.5f - 1.0f);
+                hasNormals = true;
+            } else {
+                mesh.normals.insert(mesh.normals.end(), {0.0f, 0.0f, 0.0f});
+            }
+            if (vb.uvAt >= 0) {
+                const std::size_t uv = at + static_cast<std::size_t>(vb.uvAt);
+                const bool half = vb.uvType == kHalf2 || vb.uvType == kHalf4;
+                for (int k = 0; k < 2; ++k) {
+                    const float value = half ? mesh::halfToFloat(s.u16(uv + 2 * k)) : loadScalar<float>(d, uv + 4 * k);
+                    mesh.uvs.push_back(std::isfinite(value) ? value : 0.0f);
+                }
+                hasUvs = true;
+            } else {
+                mesh.uvs.insert(mesh.uvs.end(), {0.0f, 0.0f});
             }
         }
         baseVertex[vbIndex] = base;
@@ -499,18 +681,32 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
         part.name = named ? elements[static_cast<std::size_t>(group.element)].name
                           : std::format("Part {}", mesh.parts.size() + 1);
         part.material = std::format("Material {}", group.material);
+        if (group.material < shaders.size())
+            part.shader = shaders[group.material];
         if (named && !elements[static_cast<std::size_t>(group.element)].isIdentity())
             placePart(mesh, part, elements[static_cast<std::size_t>(group.element)]);
         mesh.parts.push_back(std::move(part));
     }
     if (mesh.indices.empty())
         return fail(ErrorCode::InvalidFormat, "no drawable triangles found");
+    if (!hasNormals)
+        mesh.normals.clear();
+    if (!hasUvs)
+        mesh.uvs.clear();
+    mesh.textures = readTextures(s, d, arch);
     mesh.notes.push_back(std::format("{} vertex buffer(s), {} index buffer(s), {} part(s), {} detail level(s)",
                                      vbs.size(), ibs.size(), mesh.parts.size(), mesh.lodCount()));
     if (shadows)
         mesh.notes.push_back(std::format("{} shadow-hull part(s) (hidden until ticked in the parts list)", shadows));
     if (skipped)
         mesh.notes.push_back(std::format("{} part(s) not understood yet", skipped));
+    if (!mesh.textures.empty()) {
+        std::string list;
+        for (const Mesh::Texture& t : mesh.textures)
+            list += std::format("{}{} ({}x{} {})", list.empty() ? "" : ", ", t.name, t.image.width, t.image.height,
+                                t.image.format);
+        mesh.notes.push_back(std::format("{} texture(s) in the file: {}", mesh.textures.size(), list));
+    }
     return mesh;
 }
 

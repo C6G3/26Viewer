@@ -268,6 +268,41 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
 - 1,539 of 1,543 models decode; the other 4 contain no geometry.
 - Positions are left-handed (Direct3D: x right, y up, z forward), so viewers mirror x.
 
+### Vertex elements, materials and textures
+
+- **Vertex elements.** Each vertex buffer record is preceded by its element list:
+  `RA00`, u32 stride, `RA00`, u32 n, then n × (`RA00`, u32 type, u32 0, u32 usage,
+  u32 usage index). Usages are Direct3D's (0 position, 3 normal, 5 texcoord, 6/7
+  tangent/binormal — those sit in a second stream); type codes are the engine's own:
+
+  | Type | Bytes | Meaning |
+  |---|---|---|
+  | 0x06 | 12 | float3 (positions of world objects) |
+  | 0x07 | 16 | float4 |
+  | 0x08 | 4 | half2 (texture coordinates) |
+  | 0x09 | 8 | half4 (car positions, texcoords; tangents) |
+  | 0x0A | 4 | 4 bytes (indices) |
+  | 0x0B | 4 | 4 bytes mapped to −1…1 (normals; also damage offsets as texcoords 2/3) |
+
+  A shared list of vertex declarations (same element records, with stream and offset)
+  sits at the start of the Scene stream too. Checked over all 1,745 models.
+- **Materials.** `RA00`, u32 count, then per material an empty `RA00` and `RA00`, u32
+  length, the effect name (`veh_Paint_a_b_c.fx`, `veh_Glass_c_h.fx`…). A draw group's
+  material number (in the `RA01` record before its draws) indexes this list. The letters
+  after the family name are feature switches. Later, a render list declares each
+  effect's parameters (`g_MeshTexture`, `g_DentTexture`, `g_vMtlParameters`… with a
+  type: 7 texture, 6 float4s, 9 …) and their byte offsets in a value block; **where the
+  values (which texture each material uses) are stored is still unknown** 🟡.
+- **Textures** are stored in the model (no separate files for cars). Full ones: a
+  length-prefixed name, an `RA01` header of 12 words ending in a hash and the byte size,
+  then the `.texture` Data layout (width, height, depth, mips, format, 0, 3) and pixels.
+  Streamed ones: the name and an `RA01` header of 13 words ending in hash, 1, 28 for
+  the smallest size (16×16, whole mip chain), then each larger size as `RA00`, 2, 1, 28,
+  the Data layout and a blob with that size's top level. The Audi S3 holds 15
+  (interior/engine sheet `audis3_1`, `audis3_2`, `audis3_alpha`, scratches, tyres,
+  brake discs, broken glass…).
+- `MtaDbg` (last chunk): the exporter's build info and error log.
+
 ### Names, hierarchy and placement (`MdlDat`)
 
 - `StrTab`: u32 count, u32 offsets[count], u32 ?, then NUL-terminated strings.

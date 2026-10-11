@@ -47,8 +47,26 @@ std::string toObj(const Mesh& mesh)
     std::string out;
     // OBJ is right-handed: mirror x of left-handed (Direct3D) models and swap the winding.
     const float sx = mesh.leftHanded ? -1.0f : 1.0f;
+    const bool uvs = mesh.uvs.size() == 2 * mesh.vertexCount();
+    const bool normals = mesh.normals.size() == mesh.positions.size();
     for (std::size_t v = 0; v < mesh.vertexCount(); ++v)
         out += std::format("v {} {} {}\n", sx * mesh.positions[3 * v], mesh.positions[3 * v + 1], mesh.positions[3 * v + 2]);
+    if (uvs) // OBJ's v points up, Direct3D's down
+        for (std::size_t v = 0; v < mesh.vertexCount(); ++v)
+            out += std::format("vt {} {}\n", mesh.uvs[2 * v], 1.0f - mesh.uvs[2 * v + 1]);
+    if (normals)
+        for (std::size_t v = 0; v < mesh.vertexCount(); ++v)
+            out += std::format("vn {} {} {}\n", sx * mesh.normals[3 * v], mesh.normals[3 * v + 1], mesh.normals[3 * v + 2]);
+    auto corner = [&](std::uint32_t index) {
+        const std::uint32_t n = index + 1;
+        if (uvs && normals)
+            return std::format("{}/{}/{}", n, n, n);
+        if (uvs)
+            return std::format("{}/{}", n, n);
+        if (normals)
+            return std::format("{}//{}", n, n);
+        return std::to_string(n);
+    };
     for (const Mesh::Part& part : mesh.parts) {
         if (part.shadow || part.lods.empty())
             continue;
@@ -56,7 +74,7 @@ std::string toObj(const Mesh& mesh)
         const Mesh::Range& range = part.lods.front();
         for (std::uint32_t i = range.firstIndex; i + 2 < range.firstIndex + range.indexCount; i += 3) {
             const std::uint32_t b = mesh.leftHanded ? i + 2 : i + 1, c = mesh.leftHanded ? i + 1 : i + 2;
-            out += std::format("f {} {} {}\n", mesh.indices[i] + 1, mesh.indices[b] + 1, mesh.indices[c] + 1);
+            out += std::format("f {} {} {}\n", corner(mesh.indices[i]), corner(mesh.indices[b]), corner(mesh.indices[c]));
         }
     }
     return out;

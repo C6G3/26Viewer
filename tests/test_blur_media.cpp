@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 
 using namespace viewer;
 using namespace viewer::games::blur;
@@ -484,6 +485,40 @@ TEST_CASE("Real Blur models and audio banks (set BLUR_DIR to enable)")
     const std::uint32_t v = car->indices[disc->lods[0].firstIndex];
     CHECK(car->positions[3 * v] < -0.6f);
     CHECK(car->positions[3 * v + 2] > 1.0f);
+
+    // Normals (unit length, turned with their parts), texture coordinates, effects and textures.
+    REQUIRE(car->normals.size() == car->positions.size());
+    REQUIRE(car->uvs.size() == 2 * car->vertexCount());
+    std::size_t unit = 0, used = 0;
+    for (const Mesh::Part& part : car->parts) {
+        if (part.shadow)
+            continue;
+        for (std::uint32_t i = part.lods[0].firstIndex; i < part.lods[0].firstIndex + part.lods[0].indexCount; ++i) {
+            const std::uint32_t n = car->indices[i];
+            const float len = std::hypot(car->normals[3 * n], car->normals[3 * n + 1], car->normals[3 * n + 2]);
+            unit += std::abs(len - 1.0f) < 0.02f;
+            ++used;
+        }
+    }
+    CHECK(unit > used * 99 / 100);
+    CHECK(door->shader.starts_with("veh_"));
+    CHECK(door->shader.ends_with(".fx"));
+    const auto texture = [&](std::string_view name) -> const Mesh::Texture* {
+        for (const auto& t : car->textures)
+            if (t.name == name)
+                return &t;
+        return nullptr;
+    };
+    std::string found;
+    for (const auto& t : car->textures)
+        found += std::format("{} {}x{}; ", t.name, t.image.width, t.image.height);
+    INFO(found);
+    const Mesh::Texture* interior = texture("audis3_1");
+    REQUIRE(interior);
+    CHECK(interior->image.width == 512);
+    CHECK(interior->image.format.starts_with("DXT1"));
+    REQUIRE(texture("paintdent"));
+    CHECK(car->textures.size() >= 15);
 
     const auto engine = find("audio/toyota_i6.baf");
     REQUIRE(engine);

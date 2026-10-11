@@ -63,7 +63,10 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 
 1. [ ] `ARCH` `.levelstream` archives (loose in `levels/`) → new `ArchiveFormat`
 2. [x] `.model` geometry: vertex/index buffers, all LODs, shadow hulls (see docs/formats/blur.md); next: part names, materials, UVs
-3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL); next: textures and game-accurate shading
+3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL)
+   - [x] Real normals and UVs; material look per effect (paint colour, glass, lights, chrome); embedded textures listed and exported
+   - [ ] Material values (which texture each material uses) → textured rendering
+   - [ ] Translate the game's effects (`shaders-speed.pak`) for an exact match
 4. [x] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia); import WAV folders and
    replace single sounds (ADPCM encoder; every game bank rebuilds byte for byte)
 4b. [x] Bink `.bik` video playback (Qt Multimedia FFmpeg backend), audio track picker

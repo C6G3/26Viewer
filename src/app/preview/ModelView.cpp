@@ -1,16 +1,21 @@
 #include "ModelView.hpp"
 
+#include "ImageView.hpp"
+
 #include "../Icons.hpp"
 #include "../QtConvert.hpp"
 
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
+#include <QDialog>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLocale>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPixmap>
 #include <QSettings>
 #include <QSplitter>
 #include <QToolButton>
@@ -19,6 +24,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -48,14 +54,49 @@ constexpr const char* kFragmentShader = R"(
 uniform vec3 color;
 uniform float lit;
 uniform float alpha;
+uniform float specular; // highlight strength (glossy paint, chrome, glass)
+uniform float rim;      // brightening towards the edges (reflections on paint)
 varying vec3 vNormal;
 void main() {
     // Headlight: light comes from the camera; both faces lit (models are often single-sided).
     float d = abs(normalize(vNormal).z);
-    vec3 shaded = color * (0.28 + 0.72 * d);
+    vec3 shaded = color * (0.28 + 0.72 * d) + vec3(specular * pow(d, 48.0)) + vec3(rim * 0.6 * pow(1.0 - d, 3.0));
     gl_FragColor = vec4(mix(color, shaded, lit), alpha);
 }
 )";
+
+/// How a part looks with "Materials" on, from the game's effect name.
+struct Look {
+    QVector3D color;
+    float specular = 0.0f;
+    float rim = 0.0f;
+    float alpha = 1.0f;
+    float lit = 1.0f; ///< 1: shaded by the light; lower: glows (lights)
+    bool known = false;
+};
+
+Look lookFor(const std::string& shader, const QVector3D& paint)
+{
+    std::string s = shader;
+    for (char& c : s)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const auto has = [&](const char* what) { return s.find(what) != std::string::npos; };
+    if (has("_paint"))
+        return {paint, 0.55f, 0.6f, 1.0f, 1.0f, true};
+    if (has("_glass"))
+        return {QVector3D(0.10f, 0.13f, 0.16f), 0.9f, 0.4f, 0.45f, 1.0f, true};
+    if (has("_light"))
+        return {QVector3D(1.0f, 0.96f, 0.88f), 0.3f, 0.0f, 1.0f, 0.35f, true};
+    if (has("_neon"))
+        return {QVector3D(0.85f, 0.9f, 1.0f), 0.2f, 0.0f, 1.0f, 0.3f, true};
+    if (has("_alloy") || has("_chrome"))
+        return {QVector3D(0.78f, 0.79f, 0.81f), 0.8f, 0.5f, 1.0f, 1.0f, true};
+    if (has("_matt"))
+        return {QVector3D(0.16f, 0.16f, 0.17f), 0.05f, 0.0f, 1.0f, 1.0f, true};
+    if (has("veh_default"))
+        return {QVector3D(0.30f, 0.31f, 0.33f), 0.15f, 0.0f, 1.0f, 1.0f, true};
+    return {};
+}
 
 QVector3D rgb(const QColor& c)
 {
@@ -204,6 +245,18 @@ void ModelCanvas::setShowShadow(bool on)
     update();
 }
 
+void ModelCanvas::setShowMaterials(bool on)
+{
+    m_materials = on;
+    update();
+}
+
+void ModelCanvas::setPaintColor(const QColor& color)
+{
+    m_paint = rgb(color);
+    update();
+}
+
 void ModelCanvas::resetView()
 {
     m_target = m_center;
@@ -261,10 +314,17 @@ void ModelCanvas::upload()
                 normals[c] += n;
             }
         }
+    // The file's own normals win when it has them (they include the artists' smoothing).
+    const bool fileNormals = mesh.normals.size() == mesh.positions.size();
     std::vector<float> interleaved;
     interleaved.reserve(mesh.vertexCount() * 6);
     for (std::size_t v = 0; v < mesh.vertexCount(); ++v) {
-        const QVector3D n = (detailed[v].isNull() ? coarse[v] : detailed[v]).normalized();
+        QVector3D n = (detailed[v].isNull() ? coarse[v] : detailed[v]).normalized();
+        if (fileNormals) {
+            const QVector3D stored(mesh.normals[3 * v], mesh.normals[3 * v + 1], mesh.normals[3 * v + 2]);
+            if (stored.lengthSquared() > 0.25f)
+                n = stored.normalized();
+        }
         interleaved.insert(interleaved.end(), {mesh.positions[3 * v], mesh.positions[3 * v + 1],
                                                mesh.positions[3 * v + 2], n.x(), n.y(), n.z()});
     }
@@ -343,6 +403,8 @@ void ModelCanvas::paintGL()
     m_program.setUniformValue("model", QMatrix4x4());
     m_program.setUniformValue("normalMatrix", view.normalMatrix());
     m_program.setUniformValue("alpha", 1.0f);
+    m_program.setUniformValue("specular", 0.0f);
+    m_program.setUniformValue("rim", 0.0f);
     m_program.enableAttributeArray(0);
     m_program.enableAttributeArray(1);
 
@@ -399,15 +461,42 @@ void ModelCanvas::paintGL()
     if (m_solid) {
         glEnable(GL_POLYGON_OFFSET_FILL); // keeps the wireframe overlay on top of the faces
         glPolygonOffset(1.0f, 1.0f);
-        m_program.setUniformValue("lit", 1.0f);
-        for (std::size_t p = 0; p < mesh.parts.size(); ++p) {
-            const Mesh::Range* r = partVisible(p) ? lodRange(p) : nullptr;
-            if (!r)
-                continue;
-            const QVector3D c = mesh.parts[p].shadow ? hull : base;
+        // Opaque parts first, then see-through ones (glass) blended over them.
+        std::vector<std::pair<std::size_t, Look>> clear;
+        const auto drawPart = [&](std::size_t p, const Look& look) {
+            const QVector3D c = look.color;
+            m_program.setUniformValue("lit", look.lit);
+            m_program.setUniformValue("specular", look.specular);
+            m_program.setUniformValue("rim", look.rim);
+            m_program.setUniformValue("alpha", look.alpha);
             m_program.setUniformValue("color", m_highlighted[p] ? c * 0.35f + accent * 0.65f : c);
-            drawTriangles(*r);
+            drawTriangles(*lodRange(p));
+        };
+        for (std::size_t p = 0; p < mesh.parts.size(); ++p) {
+            if (!partVisible(p) || !lodRange(p))
+                continue;
+            Look look = m_materials && !mesh.parts[p].shadow ? lookFor(mesh.parts[p].shader, m_paint) : Look{};
+            if (!look.known)
+                look.color = mesh.parts[p].shadow ? hull : base;
+            if (look.alpha < 1.0f && !m_highlighted[p]) {
+                clear.emplace_back(p, look);
+                continue;
+            }
+            look.alpha = 1.0f;
+            drawPart(p, look);
         }
+        if (!clear.empty()) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            for (const auto& [p, look] : clear)
+                drawPart(p, look);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+        m_program.setUniformValue("specular", 0.0f);
+        m_program.setUniformValue("rim", 0.0f);
+        m_program.setUniformValue("alpha", 1.0f);
         glDisable(GL_POLYGON_OFFSET_FILL);
     }
     if (m_wireframe || !m_solid) {
@@ -476,7 +565,8 @@ ModelView::ModelView(QWidget* parent)
     : QWidget(parent), m_canvas(new ModelCanvas(this)), m_splitter(new QSplitter(this)),
       m_parts(new QTreeWidget(this)), m_info(new QLabel(this)), m_solid(new QCheckBox(tr("Solid"), this)),
       m_wireframe(new QCheckBox(tr("Wireframe"), this)), m_grid(new QCheckBox(tr("Grid"), this)),
-      m_shadow(new QCheckBox(tr("Shadow"), this)), m_lod(new QComboBox(this))
+      m_shadow(new QCheckBox(tr("Shadow"), this)), m_materials(new QCheckBox(tr("Materials"), this)),
+      m_paint(new QToolButton(this)), m_lod(new QComboBox(this))
 {
     m_info->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
@@ -497,6 +587,27 @@ ModelView::ModelView(QWidget* parent)
     option(m_grid, "grid", true, tr("Ground grid (lines every 1, 10, 100… units; every 5th stronger)"),
            &ModelCanvas::setShowGrid);
     option(m_shadow, "shadow", true, tr("Soft shadow on the ground"), &ModelCanvas::setShowShadow);
+    option(m_materials, "materials", true,
+           tr("Colour parts by the game's material: car paint, glass, lights, chrome… (textures aren't applied yet)"),
+           &ModelCanvas::setShowMaterials);
+
+    // Car paint colour: the game lets the player choose it, so it's ours to pick too.
+    m_canvas->setPaintColor(settings.value("preview/model/paint", QColor(140, 18, 16)).value<QColor>());
+    m_paint->setAutoRaise(true);
+    m_paint->setToolTip(tr("Car paint colour"));
+    updatePaintButton();
+    connect(m_paint, &QToolButton::clicked, this, [this] {
+        QSettings store;
+        const QColor current = store.value("preview/model/paint", QColor(140, 18, 16)).value<QColor>();
+        const QColor chosen = QColorDialog::getColor(current, this, tr("Car Paint Colour"));
+        if (!chosen.isValid())
+            return;
+        store.setValue("preview/model/paint", chosen);
+        m_canvas->setPaintColor(chosen);
+        updatePaintButton();
+    });
+    connect(m_materials, &QCheckBox::toggled, m_paint, &QWidget::setEnabled);
+    m_paint->setEnabled(m_materials->isChecked());
 
     m_lod->setToolTip(tr("Level of detail: what the game draws close up (LOD 0) or far away"));
     connect(m_lod, &QComboBox::currentIndexChanged, this, [this](int lod) {
@@ -529,6 +640,10 @@ ModelView::ModelView(QWidget* parent)
         m_canvas->setHighlightedParts(std::move(selected));
     });
     connect(m_parts, &QTreeWidget::customContextMenuRequested, this, &ModelView::showPartsMenu);
+    connect(m_parts, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem* item) {
+        if (const QVariant t = item->data(0, Qt::UserRole + 1); t.isValid())
+            showTexture(t.toInt());
+    });
 
     m_splitter->addWidget(m_parts);
     m_splitter->addWidget(m_canvas);
@@ -547,6 +662,8 @@ ModelView::ModelView(QWidget* parent)
     bar->addWidget(m_wireframe);
     bar->addWidget(m_grid);
     bar->addWidget(m_shadow);
+    bar->addWidget(m_materials);
+    bar->addWidget(m_paint);
     bar->addSpacing(8);
     bar->addWidget(m_lod);
     bar->addWidget(reset);
@@ -677,8 +794,24 @@ void ModelView::buildTree()
         for (std::size_t part : shadows)
             partItem(new QTreeWidgetItem(folder, {toQString(m_mesh->parts[part].name)}), part);
     }
+    if (!m_mesh->textures.empty()) {
+        // Textures stored in the model: double-click to look at one.
+        auto* folder = new QTreeWidgetItem(m_parts, {tr("Textures")});
+        folder->setData(0, Qt::UserRole + 2, true); // not parts: no counts, starts collapsed
+        folder->setToolTip(0, tr("Textures stored in the model file. Double-click one to see it."));
+        for (std::size_t t = 0; t < m_mesh->textures.size(); ++t) {
+            const Mesh::Texture& texture = m_mesh->textures[t];
+            auto* item = new QTreeWidgetItem(folder, {toQString(texture.name),
+                                                      QStringLiteral("%1×%2").arg(texture.image.width).arg(texture.image.height)});
+            item->setData(0, Qt::UserRole + 1, static_cast<int>(t));
+            item->setTextAlignment(1, Qt::AlignRight | Qt::AlignVCenter);
+            item->setToolTip(0, tr("%1 · double-click to view").arg(toQString(texture.image.format)));
+        }
+        folder->setExpanded(false);
+    }
     for (int i = 0; i < m_parts->topLevelItemCount(); ++i) // top level plus one more
-        m_parts->topLevelItem(i)->setExpanded(true);
+        if (!m_parts->topLevelItem(i)->data(0, Qt::UserRole + 2).toBool())
+            m_parts->topLevelItem(i)->setExpanded(true);
     if (m_parts->topLevelItemCount() == 1)
         for (int i = 0; i < m_parts->topLevelItem(0)->childCount(); ++i)
             m_parts->topLevelItem(0)->child(i)->setExpanded(true);
@@ -729,7 +862,8 @@ void ModelView::updateCounts()
         return sum;
     };
     for (int f = 0; f < m_parts->topLevelItemCount(); ++f)
-        total(m_parts->topLevelItem(f));
+        if (!m_parts->topLevelItem(f)->data(0, Qt::UserRole + 2).toBool())
+            total(m_parts->topLevelItem(f));
     m_updatingTree = false;
     m_info->setText(tr("%1 vertices  ·  %2 triangles shown  ·  %n part(s)", nullptr,
                        static_cast<int>(m_mesh->parts.size()))
@@ -755,6 +889,37 @@ void ModelView::setAllParts(bool on, bool includeShadows)
                                                                                                 : Qt::Unchecked);
     m_updatingTree = false;
     applyVisibility();
+}
+
+void ModelView::updatePaintButton()
+{
+    const QColor color = QSettings().value("preview/model/paint", QColor(140, 18, 16)).value<QColor>();
+    QPixmap swatch(16, 16);
+    swatch.fill(color);
+    m_paint->setIcon(QIcon(swatch));
+}
+
+void ModelView::showTexture(int index)
+{
+    if (!m_mesh || index < 0 || static_cast<std::size_t>(index) >= m_mesh->textures.size())
+        return;
+    const Mesh::Texture& texture = m_mesh->textures[static_cast<std::size_t>(index)];
+    const QImage image(texture.image.rgba.data(), static_cast<int>(texture.image.width),
+                       static_cast<int>(texture.image.height), static_cast<qsizetype>(texture.image.width) * 4,
+                       QImage::Format_RGBA8888);
+    auto* window = new QDialog(this);
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->setWindowTitle(toQString(texture.name));
+    auto* view = new ImageView(window);
+    view->setImage(image.copy(), QStringLiteral("%1 × %2  ·  %3")
+                                     .arg(texture.image.width)
+                                     .arg(texture.image.height)
+                                     .arg(toQString(texture.image.format)));
+    auto* layout = new QVBoxLayout(window);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(view);
+    window->resize(640, 680);
+    window->show();
 }
 
 void ModelView::showPartsMenu(const QPoint& pos)
