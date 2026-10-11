@@ -15,6 +15,7 @@ namespace viewer::app {
 //              audio banks → a folder of .wav files (one per sound)
 //              models      → .obj
 //              textures    → .png / .dds / .jpg / .bmp (the user's choice)
+//              decompilable data (Blur audio entities) → .txt
 //            Anything without a converter is written as is.
 //   Replace  puts a raw file back (same type as the original).
 //   Import   converts back: a folder of .wav files → the bank, a picture →

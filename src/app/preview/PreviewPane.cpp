@@ -46,6 +46,7 @@ struct PreviewResult {
     bool hasText = false;
     TextSyntax syntax = TextSyntax::Plain;
     QString textInfo; ///< "UTF-16 LE · CRLF"
+    bool decompiled = false; ///< Text made from a binary file: can't be edited as text.
     bool textTruncated = false;
 
     std::shared_ptr<const Mesh> mesh;
@@ -196,9 +197,20 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
 
     r->bytes = QByteArray(reinterpret_cast<const char*>(data->data()), static_cast<qsizetype>(data->size()));
 
-    // Text
-    if (r->image.isNull() && (type.category == FileCategory::Text || looksLikeText(span)))
+    // Text: a decompiler's reading of a binary file, or the file itself
+    if (const TextDecompiler* decompiler = session->content.findDecompiler(ext, span)) {
+        if (auto text = decompiler->decompile(span)) {
+            r->text = toQString(*text);
+            r->hasText = true;
+            r->decompiled = true;
+            r->syntax = decompiler->syntax();
+            r->textInfo = QObject::tr("%1, decompiled (read-only)").arg(toQString(decompiler->name()));
+        } else {
+            r->structureError = toQString(text.error().message);
+        }
+    } else if (r->image.isNull() && (type.category == FileCategory::Text || looksLikeText(span))) {
         decodeTextInto(*r, span, node->name());
+    }
     return r;
 }
 
@@ -411,6 +423,7 @@ void PreviewPane::applyResult(const PreviewResult& result)
         if (result.textTruncated)
             info += tr("  ·  showing the first %1").arg(QLocale().formattedDataSize(kTextLimit));
         m_text->setText(result.text, result.syntax, info);
+        m_text->setEditButtonVisible(!result.decompiled);
         m_previewStack->setCurrentWidget(m_text);
     } else {
         hasPreview = false;

@@ -5,6 +5,7 @@
 #include "viewer/core/FileTypes.hpp"
 #include "viewer/core/Image.hpp"
 #include "viewer/core/Mesh.hpp"
+#include "viewer/core/Text.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -65,6 +66,18 @@ public:
     [[nodiscard]] virtual Result<StructureNode> parse(ByteSpan data) const = 0;
 };
 
+/// Turns a binary file into readable text ("decompiles" it): shown read-only
+/// in the text view and written as .txt by Export.
+class TextDecompiler {
+public:
+    virtual ~TextDecompiler() = default;
+    [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+    [[nodiscard]] virtual bool canDecompile(std::string_view extension, ByteSpan data) const = 0;
+    [[nodiscard]] virtual Result<std::string> decompile(ByteSpan data) const = 0;
+    /// Colour coding for the text.
+    [[nodiscard]] virtual TextSyntax syntax() const noexcept { return TextSyntax::Plain; }
+};
+
 /// Everything a session knows how to open, decode and describe.
 ///
 /// Built-in (game-agnostic) handlers are registered first by
@@ -80,6 +93,7 @@ public:
     void addStructureParser(std::shared_ptr<const StructureParser> parser);
     void addMeshDecoder(std::shared_ptr<const MeshDecoder> decoder);
     void addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format);
+    void addDecompiler(std::shared_ptr<const TextDecompiler> decompiler);
 
     /// Finds a format able to open `path` (extension filter, then header probe).
     [[nodiscard]] const ArchiveFormat* findArchiveFormat(const std::filesystem::path& path) const;
@@ -88,6 +102,7 @@ public:
     [[nodiscard]] const MeshDecoder* findMeshDecoder(std::string_view extension, ByteSpan data) const;
     /// `header`: the first bytes of the file (up to 4 KiB).
     [[nodiscard]] const SoundBankFormat* findSoundBankFormat(std::string_view extension, ByteSpan header) const;
+    [[nodiscard]] const TextDecompiler* findDecompiler(std::string_view extension, ByteSpan data) const;
 
     [[nodiscard]] const auto& archiveFormats() const noexcept { return m_archiveFormats; }
 
@@ -98,6 +113,7 @@ private:
     std::vector<std::shared_ptr<const StructureParser>> m_structureParsers;
     std::vector<std::shared_ptr<const MeshDecoder>> m_meshDecoders;
     std::vector<std::shared_ptr<const SoundBankFormat>> m_soundBankFormats;
+    std::vector<std::shared_ptr<const TextDecompiler>> m_decompilers;
 };
 
 /// Registers handlers shared by all games: common file types, DDS decoding.

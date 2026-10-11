@@ -1,5 +1,6 @@
 // Blur (Bizarre Creations, 2010) — game module entry point.
 
+#include "AudioEntity.hpp"
 #include "BafBank.hpp"
 #include "ChunkFile.hpp"
 #include "ModelDecoder.hpp"
@@ -50,6 +51,8 @@ public:
         registry.addStructureParser(std::make_shared<ChunkStructureParser>());
         registry.addMeshDecoder(std::make_shared<ModelDecoder>());
         registry.addSoundBankFormat(std::make_shared<BafFormat>());
+        registry.addDecompiler(std::make_shared<AudioEntityDecompiler>());
+        registry.addStructureParser(std::make_shared<AudioEntityStructureParser>());
 
         auto& t = registry.fileTypes();
         t.add({"pak", "Blur package", FileCategory::Archive});

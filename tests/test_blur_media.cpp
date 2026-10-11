@@ -3,6 +3,7 @@
 
 #include "TestUtil.hpp"
 
+#include "AudioEntity.hpp"
 #include "BafBank.hpp"
 #include "ChunkFile.hpp"
 #include "ModelDecoder.hpp"
@@ -13,6 +14,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -594,4 +596,112 @@ TEST_CASE("Every real Blur texture rebuilds byte for byte (set BLUR_DIR to enabl
     }
     CHECK(checked >= 321); // every .texture in the game's archives
     CHECK(dds > 0);
+}
+
+namespace {
+
+/// A tiny audio entity: a control input, a rolloff fed by it and a product of both.
+ByteBuffer buildAudioEntity()
+{
+    test::Writer w;
+    w.put("JBOA");
+    w.put<std::uint16_t>(11);
+    w.put<std::uint16_t>(2);
+    w.put<std::uint32_t>(0); // string pool offset, patched below
+    w.put<std::uint32_t>(0); // entity name: "Test"
+    w.put<std::uint32_t>(3); // components
+    w.put<std::uint32_t>(6); // update rate
+    // #0 ControlInput "Speed"
+    w.put<std::uint32_t>(0x06);
+    w.put<std::uint32_t>(5);
+    // #1 Rolloff "Fade": input #0:0, five parameters
+    w.put<std::uint32_t>(0x18);
+    w.put<std::uint32_t>(11);
+    w.put<std::uint16_t>(0);
+    w.put<std::uint16_t>(0);
+    for (float f : {1.0f, 1.0f, 1.0f, 10.0f, 300.0f}) {
+        w.put<std::uint32_t>(0x0000ffff);
+        w.put<std::uint32_t>(std::bit_cast<std::uint32_t>(f));
+    }
+    // #2 Product "Gain": two items, the second fed by #1:0
+    w.put<std::uint32_t>(0x25);
+    w.put<std::uint32_t>(16);
+    w.put<std::uint16_t>(2);
+    w.put<std::uint16_t>(0);
+    w.put<std::uint32_t>(0x0000ffff);
+    w.put<std::uint32_t>(std::bit_cast<std::uint32_t>(0.5f));
+    w.put<std::uint16_t>(1);
+    w.put<std::uint16_t>(0);
+    w.put<std::uint32_t>(0);
+    const auto pool = static_cast<std::uint32_t>(w.bytes.size());
+    w.put("Test", true);
+    w.put("Speed", true);
+    w.put("Fade", true);
+    w.put("Gain", true);
+    w.patch<std::uint32_t>(8, pool);
+    return w.bytes;
+}
+
+} // namespace
+
+TEST_CASE("Blur audio entities parse and decompile to readable text")
+{
+    const ByteBuffer data = buildAudioEntity();
+    auto e = parseAudioEntity(data);
+    REQUIRE(e);
+    CHECK(e->name == "Test");
+    CHECK(e->updateRate == 6);
+    REQUIRE(e->components.size() == 3);
+    CHECK(e->components[1].typeName == "Rolloff");
+    CHECK(e->components[1].name == "Fade");
+    CHECK(e->components[2].offset + e->components[2].size == e->poolOffset);
+
+    auto text = decompileAudioEntity(data);
+    REQUIRE(text);
+    CHECK(text->find("#1 Rolloff \"Fade\"") != std::string::npos);
+    CHECK(text->find("input 1   #0:0 Speed") != std::string::npos);
+    CHECK(text->find("param 5   = 300") != std::string::npos);
+    CHECK(text->find("param 1   <- #1:0 Fade (default 0)") != std::string::npos);
+
+    AudioEntityDecompiler decompiler;
+    CHECK(decompiler.canDecompile("dat", data));
+    CHECK_FALSE(decompiler.canDecompile("dat", asBytes("BANK and more bytes here.")));
+    auto tree = AudioEntityStructureParser().parse(data);
+    REQUIRE(tree);
+    CHECK(tree->children[1].children.size() == 3);
+
+    ByteBuffer cut(data.begin(), data.begin() + 40); // a record running past the end
+    CHECK_FALSE(parseAudioEntity(cut));
+    ByteBuffer unknown = data;
+    unknown[0x18] = std::byte{0x05}; // a type the game doesn't have
+    CHECK_FALSE(parseAudioEntity(unknown));
+}
+
+TEST_CASE("Every real Blur audio entity decompiles (set BLUR_DIR to enable)")
+{
+    const char* dir = std::getenv("BLUR_DIR");
+    if (!dir) {
+        SUCCEED("BLUR_DIR not set; skipping");
+        return;
+    }
+    auto pak = PakArchive::open(std::filesystem::path(dir) / "cache" / "root.pak");
+    REQUIRE(pak);
+    const auto entries = (*pak)->entries();
+    std::size_t checked = 0;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (!entries[i].path.starts_with("audio/dat/"))
+            continue;
+        const ByteBuffer data = (*pak)->read(i).value();
+        INFO(entries[i].path);
+        auto e = parseAudioEntity(data);
+        REQUIRE(e);
+        // every record ends exactly where the next begins, the last at the string pool
+        REQUIRE(!e->components.empty());
+        CHECK(e->components.back().offset + e->components.back().size == e->poolOffset);
+        auto text = decompileAudioEntity(data);
+        REQUIRE(text);
+        CHECK(text->find("entity \"" + e->name + "\"") != std::string::npos);
+        ++checked;
+    }
+    CHECK(checked == 365);
 }

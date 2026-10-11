@@ -68,6 +68,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    replace single sounds (ADPCM encoder; every game bank rebuilds byte for byte)
 4b. [x] Bink `.bik` video playback (Qt Multimedia FFmpeg backend), audio track picker
 4c. [x] Text viewer/editor: colour coding (XML, INI, CSV, JSON, Lua, shaders, QuickBMS), encodings round-trip, saving through Edit Mode
+4d. [x] Audio entities (`audio/dat/*.dat`, JBOA) decompiled to text (preview, Export, CLI);
+   next: recompile edited text back into the game, name the fields per component type
 5. [ ] Data tables (`.bin`, `.loc`, `.xt`) → table view
 6. [ ] `.bpr` (`2RZB`) UI packs, `.ipf` layouts, `.pf` fonts
 7. [x] PAK hashes (recovered from Blur.exe, see docs/formats/blur.md): digest = SHA-1(stored),

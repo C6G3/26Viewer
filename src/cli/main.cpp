@@ -74,7 +74,10 @@ Usage:
   26viewer-cli backup  <file>                     Save the original as <file>.bak (once; never overwritten)
   26viewer-cli media   <archive|game dir> [filter] [out]
                                                   Decode every audio bank and model (sanity check);
-                                                  with <out>, also write sounds as .wav and models as .obj)");
+                                                  with <out>, also write sounds as .wav and models as .obj
+  26viewer-cli decompile <archive|game dir> [filter] [out]
+                                                  Turn binary data (Blur audio entities) into text:
+                                                  printed, or written as .txt files under <out>)");
     return 2;
 }
 
@@ -279,6 +282,49 @@ int cmdBackup(const fs::path& file)
     return 0;
 }
 
+int cmdDecompile(const fs::path& target, const std::string& filter, const fs::path& outDir)
+{
+    Session s;
+    auto root = mount(s, target);
+    if (!root) {
+        std::println(stderr, "error: {}", root.error().message);
+        return 1;
+    }
+    std::size_t done = 0, failures = 0;
+    for (const VfsNode* node : Vfs::collectFiles(**root)) {
+        if (!matches(*node, filter))
+            continue;
+        auto data = s.vfs.read(*node);
+        if (!data) {
+            ++failures;
+            std::println(stderr, "FAIL {}: {}", node->virtualPath(), data.error().message);
+            continue;
+        }
+        const TextDecompiler* decompiler = s.content.findDecompiler(extensionOf(node->name()), *data);
+        if (!decompiler)
+            continue;
+        auto text = decompiler->decompile(*data);
+        if (!text) {
+            ++failures;
+            std::println(stderr, "FAIL {}: {}", node->virtualPath(), text.error().message);
+            continue;
+        }
+        ++done;
+        if (outDir.empty()) {
+            std::print("{}", *text);
+            continue;
+        }
+        fs::path dest = outDir / sanitizeRelativePath(node->virtualPath());
+        dest.replace_extension(".txt");
+        if (auto ok = writeFile(dest, asBytes(*text)); !ok) {
+            ++failures;
+            std::println(stderr, "FAIL {}: {}", node->virtualPath(), ok.error().message);
+        }
+    }
+    std::println(stderr, "{} file(s) decompiled, {} failure(s)", done, failures);
+    return failures ? 1 : 0;
+}
+
 int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& outDir)
 {
     Session s;
@@ -382,6 +428,8 @@ int main(int argc, char** argv)
         return cmdExtract(toPath(args[2]), toPath(args[3]), arg(4));
     if (cmd == "backup")
         return cmdBackup(toPath(args[2]));
+    if (cmd == "decompile")
+        return cmdDecompile(toPath(args[2]), arg(3), args.size() >= 5 ? toPath(args[4]) : fs::path{});
     if (cmd == "media")
         return cmdMedia(toPath(args[2]), arg(3), args.size() >= 5 ? toPath(args[4]) : fs::path{});
     if (cmd == "replace" && args.size() >= 5)

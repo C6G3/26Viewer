@@ -177,6 +177,43 @@ copied and `Data` replaced (new size, mip count and format; the unknown value an
 the `3` kept). All 321 textures in the game's archives rebuild byte for byte from
 their own pixels (`tests/test_blur_media.cpp`).
 
+## `audio/dat/*.dat` — "JBOA" audio entities ✅ (structure) / 🟡 (field meanings)
+
+365 files in `root.pak`. Each is a node graph for Bizarre's **Mercury** audio engine:
+inputs from the game (`CollisionForce`, car position…), maths components (curves,
+rolloffs, arrays, products, timers, scripts), sounds that name a `.baf` bank and its
+waves, filters and mixers, wired together by links. Decompiled to text by
+`src/games/blur/AudioEntity.cpp` (preview, Export → `.txt`, `26viewer-cli decompile`);
+Python reference: `tools/research/blur_aobj.py`.
+
+```
+0x00 "JBOA", u16 version 11, u16 2
+0x08 u32 string pool offset        0x0c u32 entity name (pool offset)
+0x10 u32 component count           0x14 u32 update rate
+0x18 components back to back:      u32 type, u32 name (pool offset), payload
+```
+
+Recovered from Blur.exe: the header check is at `0x562810`; the component factory
+(`0x5643f8`) switches on the type (≤ 0xDA, byte table `0x5658d4` → jump table
+`0x565714`), constructs the class, then calls its `load` (vtable slot 1), which calls
+the shared reader `0x5744f0` (name + FNV-1a hash) and returns the next record. That
+gives every type's name (`mov eax, name; ret` getters) and size: most are fixed, the
+rest are a header plus u16-counted lists (curve points 12 B, array/sum/product items
+8 B, sound-table waves 4 B, mixer channel blocks 20/36/68/132 B). All 365 files parse
+exactly up to their string pool.
+
+Payload words (layouts inferred from every file, checked against the links they make):
+
+| Kind | Bytes | Meaning |
+|---|---|---|
+| link | 4 | u16 component (0xFFFF = none), u16 output port — audio links sometimes leave junk in the port half |
+| parameter | 8 | link + f32 constant (used when the link is 0xFFFF) |
+| component | 4 | u32 component index (ActionIn → its Script, Array → its index input…) |
+| string | 4 | pool offset (sounds: bank name, wave names) |
+
+Field *names* aren't in the game files or the exe, so the decompiler numbers them by
+kind (`param 1`, `input 2`…).
+
 ## `.baf` — "BANK" audio bank ✅
 
 Little-endian. Decoded by `src/games/blur/BafBank.cpp`; all 319 banks (5,199 sounds,

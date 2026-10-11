@@ -31,6 +31,19 @@ void ContentRegistry::addSoundBankFormat(std::shared_ptr<const SoundBankFormat> 
     m_soundBankFormats.push_back(std::move(format));
 }
 
+void ContentRegistry::addDecompiler(std::shared_ptr<const TextDecompiler> decompiler)
+{
+    m_decompilers.push_back(std::move(decompiler));
+}
+
+const TextDecompiler* ContentRegistry::findDecompiler(std::string_view extension, ByteSpan data) const
+{
+    for (const auto& d : m_decompilers | std::views::reverse)
+        if (d->canDecompile(extension, data))
+            return d.get();
+    return nullptr;
+}
+
 const ArchiveFormat* ContentRegistry::findArchiveFormat(const std::filesystem::path& path) const
 {
     const auto ext = extensionOf(path);

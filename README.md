@@ -39,6 +39,9 @@ system, image decoders, the UI — is shared by every future game module.
   - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV,
     and (in Edit Mode) *Replace Sound…* with a `.wav` of your own.
   - **Videos** (Bink `.bik`): playback with an audio-track picker.
+  - **Blur audio entities** (`audio/dat/*.dat`): decompiled to readable text — the
+    game's sound logic (inputs, curves, rolloffs, sounds and their waves, mixers)
+    with links resolved to component names; the Structure tab lists the components.
   - **Text** with line numbers, find, and colour coding (XML, INI, CSV, JSON, Lua,
     shaders, QuickBMS). *Edit* opens a text editor; saving goes through Edit Mode.
 - **Extraction** of a selection or everything, on a background thread with
@@ -68,7 +71,8 @@ system, image decoders, the UI — is shared by every future game module.
 - **Modern Windows UI**: Windows 11 style, light/dark mode that follows the OS
   *live* (or forced via *View ▸ Theme*), Fluent icons, dark title bar,
   per-monitor high-DPI.
-- **CLI** (`26viewer-cli`) for scripted listing, verification and extraction.
+- **CLI** (`26viewer-cli`) for scripted listing, verification, extraction and
+  `decompile` (audio entities → text).
 
 ## Supported games
 

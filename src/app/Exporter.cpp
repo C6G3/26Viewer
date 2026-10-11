@@ -168,6 +168,15 @@ Result<int> exportOne(const Session& session, const ExtractItem& item, const std
     if (const ImageDecoder* decoder = session.content.findImageDecoder(ext, *data))
         return exportTexture(*decoder, *data, ext, outputDir / relative, options.images, converted);
 
+    // Decompiled → .txt (e.g. Blur's audio entities)
+    if (const TextDecompiler* decompiler = session.content.findDecompiler(ext, *data)) {
+        if (auto text = decompiler->decompile(*data)) {
+            if (auto ok = writeFile(outputDir / withExtension(relative, ".txt"), asBytes(*text)); !ok)
+                return std::unexpected(ok.error());
+            return 1;
+        }
+    }
+
     // No converter: as is.
     converted = false;
     if (auto ok = writeFile(outputDir / relative, *data); !ok)
