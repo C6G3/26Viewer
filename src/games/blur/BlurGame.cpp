@@ -3,6 +3,7 @@
 #include "AudioEntity.hpp"
 #include "BafBank.hpp"
 #include "ChunkFile.hpp"
+#include "Animation.hpp"
 #include "ModelDecoder.hpp"
 #include "PakArchive.hpp"
 #include "Physics.hpp"
@@ -53,6 +54,8 @@ public:
         registry.addMeshDecoder(std::make_shared<ModelDecoder>());
         registry.addMeshDecoder(std::make_shared<LevelPhysicsDecoder>());
         registry.addTextureDictionary(std::make_shared<ModelTextureDictionary>());
+        registry.addSkeletonDecoder(std::make_shared<SkeletonFileDecoder>());
+        registry.addAnimationDecoder(std::make_shared<CycleDecoder>());
         registry.addSoundBankFormat(std::make_shared<BafFormat>());
         registry.addDecompiler(std::make_shared<AudioEntityDecompiler>());
         registry.addStructureParser(std::make_shared<AudioEntityStructureParser>());

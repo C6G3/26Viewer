@@ -1,5 +1,6 @@
 #pragma once
 
+#include "viewer/core/Animation.hpp"
 #include "viewer/core/Archive.hpp"
 #include "viewer/core/Audio.hpp"
 #include "viewer/core/FileTypes.hpp"
@@ -122,6 +123,8 @@ public:
     void addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format);
     void addDecompiler(std::shared_ptr<const TextDecompiler> decompiler);
     void addTextureDictionary(std::shared_ptr<const TextureDictionaryFormat> format);
+    void addSkeletonDecoder(std::shared_ptr<const SkeletonDecoder> decoder);
+    void addAnimationDecoder(std::shared_ptr<const AnimationDecoder> decoder);
 
     /// Finds a format able to open `path` (extension filter, then header probe).
     [[nodiscard]] const ArchiveFormat* findArchiveFormat(const std::filesystem::path& path) const;
@@ -132,6 +135,8 @@ public:
     [[nodiscard]] const SoundBankFormat* findSoundBankFormat(std::string_view extension, ByteSpan header) const;
     [[nodiscard]] const TextDecompiler* findDecompiler(std::string_view extension, ByteSpan data) const;
     [[nodiscard]] const TextureDictionaryFormat* findTextureDictionary(std::string_view extension, ByteSpan data) const;
+    [[nodiscard]] const SkeletonDecoder* findSkeletonDecoder(std::string_view extension, ByteSpan data) const;
+    [[nodiscard]] const AnimationDecoder* findAnimationDecoder(std::string_view extension, ByteSpan data) const;
 
     [[nodiscard]] const auto& archiveFormats() const noexcept { return m_archiveFormats; }
 
@@ -144,6 +149,8 @@ private:
     std::vector<std::shared_ptr<const SoundBankFormat>> m_soundBankFormats;
     std::vector<std::shared_ptr<const TextDecompiler>> m_decompilers;
     std::vector<std::shared_ptr<const TextureDictionaryFormat>> m_textureDictionaries;
+    std::vector<std::shared_ptr<const SkeletonDecoder>> m_skeletonDecoders;
+    std::vector<std::shared_ptr<const AnimationDecoder>> m_animationDecoders;
 };
 
 /// Registers handlers shared by all games: common file types, DDS decoding.

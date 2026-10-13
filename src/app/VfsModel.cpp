@@ -4,8 +4,13 @@
 #include "QtConvert.hpp"
 
 #include <QDateTime>
+#include <QDir>
+#include <QFileIconProvider>
+#include <QFileInfo>
 #include <QLocale>
 #include <QMimeData>
+
+#include <system_error>
 
 namespace viewer::app {
 
@@ -16,7 +21,38 @@ QString sizeText(std::uint64_t bytes)
     return QLocale().formattedDataSize(static_cast<qint64>(bytes), 1, QLocale::DataSizeTraditionalFormat);
 }
 
+/// A game shows its own .exe icon at the top of the tree (Windows reads it
+/// from the executable's resources); otherwise a generic gamepad.
+QIcon gameIcon(const Session& session)
+{
+    if (const std::string& exe = session.game->info().executable; !exe.empty()) {
+        const QFileInfo info(toQString(session.source / exe));
+        if (info.isFile())
+            if (QIcon icon = QFileIconProvider().icon(info); !icon.isNull())
+                return icon;
+    }
+    return icons::theme(QIcon::ThemeIcon::InputGaming, QStyle::SP_DirIcon);
+}
+
 } // namespace
+
+/// The tree's top-level rows: the main mount, then everything opened alongside it.
+VfsModel::Root mainRoot(const Session& session)
+{
+    const QString where = QDir::toNativeSeparators(toQString(session.source));
+    if (session.game)
+        return {&session.vfs.root(), session.title(), where, gameIcon(session)};
+    std::error_code ec;
+    const bool folder = std::filesystem::is_directory(session.source, ec);
+    return {&session.vfs.root(), session.title(), where, folder ? icons::folder() : icons::archive()};
+}
+
+VfsModel::Root extraRoot(const Session::Extra& extra)
+{
+    const QString where = QDir::toNativeSeparators(toQString(extra.source));
+    const bool archive = extra.top->kind() == VfsNode::Kind::Archive;
+    return {extra.top, toQString(extra.source.filename()), where, archive ? icons::archive() : icons::folder()};
+}
 
 VfsModel::VfsModel(QObject* parent) : QAbstractItemModel(parent) {}
 

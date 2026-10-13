@@ -25,6 +25,8 @@ class QTreeView;
 
 namespace viewer::app {
 
+class BusyOverlay;
+
 class FolderView;
 class PreviewWindow;
 class TextEditorWindow;
@@ -226,6 +228,7 @@ private:
     QLineEdit* m_search;
     QLabel* m_statusLabel;
     QProgressBar* m_progress;
+    BusyOverlay* m_busy = nullptr; ///< "Opening Blur…" popup over the window while a game or archive opens.
     QToolButton* m_cancel;
     QFutureWatcher<MountResult>* m_mountWatcher;
 

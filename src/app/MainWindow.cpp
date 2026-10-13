@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
 #include "BackupBanner.hpp"
+#include "BusyOverlay.hpp"
 #include "Exporter.hpp"
 #include "FolderView.hpp"
 #include "GamePickerDialog.hpp"
@@ -83,37 +84,6 @@ T runBusy(QWidget* parent, const QString& text, std::function<T()> job)
 QString sizeText(std::uint64_t bytes)
 {
     return QLocale().formattedDataSize(static_cast<qint64>(bytes), 1, QLocale::DataSizeTraditionalFormat);
-}
-
-/// A game shows its own .exe icon at the top of the tree (Windows reads it
-/// from the executable's resources); otherwise a generic gamepad.
-QIcon gameIcon(const Session& session)
-{
-    if (const std::string& exe = session.game->info().executable; !exe.empty()) {
-        const QFileInfo info(toQString(session.source / exe));
-        if (info.isFile())
-            if (QIcon icon = QFileIconProvider().icon(info); !icon.isNull())
-                return icon;
-    }
-    return icons::theme(QIcon::ThemeIcon::InputGaming, QStyle::SP_DirIcon);
-}
-
-/// The tree's top-level rows: the main mount, then everything opened alongside it.
-VfsModel::Root mainRoot(const Session& session)
-{
-    const QString where = QDir::toNativeSeparators(toQString(session.source));
-    if (session.game)
-        return {&session.vfs.root(), session.title(), where, gameIcon(session)};
-    std::error_code ec;
-    const bool folder = std::filesystem::is_directory(session.source, ec);
-    return {&session.vfs.root(), session.title(), where, folder ? icons::folder() : icons::archive()};
-}
-
-VfsModel::Root extraRoot(const Session::Extra& extra)
-{
-    const QString where = QDir::toNativeSeparators(toQString(extra.source));
-    const bool archive = extra.top->kind() == VfsNode::Kind::Archive;
-    return {extra.top, toQString(extra.source.filename()), where, archive ? icons::archive() : icons::folder()};
 }
 
 /// Walks `path` ("a/b/c") down from `start`, ignoring case.
@@ -514,6 +484,7 @@ void MainWindow::buildUi()
     if (!splitter->restoreState(QSettings().value("window/browserSplitter").toByteArray()))
         splitter->setSizes({340, 1060});
     setCentralWidget(splitter);
+    m_busy = new BusyOverlay(splitter);
 
     // Status bar
     m_progress->setMaximumWidth(220);
@@ -699,6 +670,7 @@ void MainWindow::addMount(const std::filesystem::path& source)
     m_statusLabel->setText(tr("Opening %1…").arg(toQString(source.filename())));
     m_progress->setRange(0, 0);
     m_progress->show();
+    m_busy->start(tr("Opening %1…").arg(toQString(source.filename())));
     QApplication::setOverrideCursor(Qt::BusyCursor);
     // The job keeps the session (and so its content handlers) alive.
     m_mountWatcher->setFuture(QtConcurrent::run([session = m_session, source] {
@@ -715,6 +687,7 @@ void MainWindow::addMount(const std::filesystem::path& source)
 
 void MainWindow::onMountFinished()
 {
+    m_busy->stop();
     QApplication::restoreOverrideCursor();
     m_progress->hide();
     MountResult result = m_mountWatcher->result();
@@ -766,6 +739,7 @@ void MainWindow::startLoad(const QString& message, std::function<LoadResult()> j
     m_statusLabel->setText(message);
     m_progress->setRange(0, 0); // indeterminate
     m_progress->show();
+    m_busy->start(message, 100);
     QApplication::setOverrideCursor(Qt::BusyCursor);
     m_loadWatcher->setFuture(QtConcurrent::run(std::move(job)));
     updateActions();
@@ -773,6 +747,7 @@ void MainWindow::startLoad(const QString& message, std::function<LoadResult()> j
 
 void MainWindow::onLoadFinished()
 {
+    m_busy->stop();
     QApplication::restoreOverrideCursor();
     m_progress->hide();
     const LoadResult result = m_loadWatcher->result();

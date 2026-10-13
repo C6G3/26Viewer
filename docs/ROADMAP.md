@@ -67,7 +67,11 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Real normals and UVs; material look per effect (paint colour, glass, lights, chrome); embedded textures listed and exported
    - [x] Material values (which texture each material uses) → textured rendering, cars
      included (texture table recovered from Blur.exe)
-   - [ ] Skinned characters: decode `.skeleton` so heads/hands sit on their bones
+   - [x] Skinned characters: decode `.skeleton` so heads/hands sit on their bones
+   - [x] Animation player for every model: `.cycle` decoding (all 805 in `root.pak`), skinned
+     and rigid parts (vehicles, props), play/reverse/step/speed/timeline, picker tree showing
+     only animations that fit the model's skeleton
+   - [ ] Document the `.skeleton` / `.cycle` / skinning layouts in docs/formats/blur.md
    - [ ] Translate the game's effects (`shaders-speed.pak`) for an exact match
    - [x] Collision: a model's `Coll` shapes drawn over it ("Collision"); `.levelphysics`
      opens in the 3D viewer, coloured by surface material, one route layout at a time

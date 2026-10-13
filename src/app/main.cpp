@@ -23,6 +23,7 @@ struct Options {
     QString select;
     QString screenshot;
     QString theme;
+    QString animation; ///< Virtual path of an animation to pose the model with ("path@frame").
     int tab = -1;
     bool editMode = false;
 };
@@ -50,7 +51,11 @@ Options parseArguments(const QApplication& app)
         QStringLiteral("file"));
     const QCommandLineOption editMode(QStringLiteral("edit-mode"),
                                       QStringLiteral("Start with Edit Mode on, without the confirmation (automation)."));
-    parser.addOptions({select, tab, theme, screenshot, editMode});
+    const QCommandLineOption animation(QStringLiteral("animation"),
+                                       QStringLiteral("Pose the selected model with this animation (virtual path, "
+                                                      "optionally @frame)."),
+                                       QStringLiteral("path"));
+    parser.addOptions({select, tab, theme, screenshot, editMode, animation});
     parser.process(app);
 
     Options o;
@@ -59,7 +64,8 @@ Options parseArguments(const QApplication& app)
     o.screenshot = parser.value(screenshot);
     o.theme = parser.value(theme).toLower();
     o.editMode = parser.isSet(editMode);
-    const QStringList tabs{"preview", "structure", "hex", "properties", "edit", "textures"};
+    o.animation = parser.value(animation);
+    const QStringList tabs{"preview", "structure", "hex", "properties", "edit", "textures", "animations"};
     o.tab = tabs.indexOf(parser.value(tab).toLower());
     return o;
 }
@@ -74,7 +80,7 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
             QApplication::quit();
         });
     };
-    constexpr int kEditTab = 4, kTexturesTab = 5;
+    constexpr int kEditTab = 4, kTexturesTab = 5, kAnimationsTab = 6;
     QObject::connect(&window, &viewer::app::MainWindow::sessionChanged, &window, [&window, o, capture] {
         auto opened = std::make_shared<bool>(false);
         QObject::connect(&window, &viewer::app::MainWindow::previewOpened, &window,
@@ -103,8 +109,22 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
                                                       }
                                                       return;
                                                   }
+                                                  if (o.tab == kAnimationsTab) { // the animation picker instead
+                                                      QTimer::singleShot(3000, preview, [] {
+                                                          if (QWidget* picker = QApplication::activeModalWidget())
+                                                              picker->grab().save(qApp->property("shotFile").toString());
+                                                          QApplication::quit();
+                                                      });
+                                                      QTimer::singleShot(0, pane, [pane] { pane->chooseAnimation(); });
+                                                      return;
+                                                  }
                                                   if (o.tab >= 0)
                                                       pane->setCurrentTab(o.tab);
+                                                  if (!o.animation.isEmpty()) {
+                                                      const qsizetype at = o.animation.lastIndexOf(QLatin1Char('@'));
+                                                      pane->showAnimation(at > 0 ? o.animation.left(at) : o.animation,
+                                                                          at > 0 ? o.animation.mid(at + 1).toFloat() : 0.0f);
+                                                  }
                                                   capture(preview);
                                               },
                                               Qt::SingleShotConnection);
@@ -146,6 +166,7 @@ int main(int argc, char* argv[])
     if (options.editMode)
         window.setEditMode(true, /*confirm=*/false);
 
+    app.setProperty("shotFile", options.screenshot);
     if (!options.screenshot.isEmpty()) {
         window.setRememberSession(false);
         window.setOffscreen(true);

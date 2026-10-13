@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Session.hpp"
+#include "AnimationSupport.hpp"
 
 #include <QFutureWatcher>
 #include <QWidget>
@@ -16,6 +17,7 @@ class QTreeWidget;
 namespace viewer::app {
 
 class BackupBanner;
+class BusyOverlay;
 class HexView;
 class ImageView;
 class ModelView;
@@ -49,6 +51,11 @@ public:
     void setBackupWarning(const QString& fileName);
     /// Disables the banner's button while a backup is running.
     void setBackupInProgress(bool running);
+    /// Poses the shown model with the animation file at `virtualPath`, at
+    /// `frame` (automation: --animation). False if it can't be used.
+    bool showAnimation(const QString& virtualPath, float frame);
+    /// Opens the animation picker for the shown model (its "Animation…" button).
+    void chooseAnimation();
 
 signals:
     /// The current node's preview has been fully populated.
@@ -80,11 +87,13 @@ private:
     QLabel* m_title;
     QLabel* m_subtitle;
     BackupBanner* m_banner;
+    BusyOverlay* m_busy; ///< "Loading …" popup over the tabs while a file loads.
     QTabWidget* m_tabs;
     QStackedWidget* m_previewStack;
     QLabel* m_message;
     ImageView* m_image;
     ModelView* m_model;
+    AnimationPickerState m_pickerState; ///< Where the animation picker was left for the model shown.
     SoundBankView* m_bankView;
     VideoView* m_video;
     TextView* m_text;

@@ -5,6 +5,7 @@
 
 #include <QCheckBox>
 #include <QColorDialog>
+#include <QFileInfo>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -14,8 +15,11 @@
 #include <QMouseEvent>
 #include <QPixmap>
 #include <QSettings>
+#include <QSlider>
 #include <QSplitter>
+#include <QTimer>
 #include <QToolButton>
+#include <QTransform>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -409,6 +413,8 @@ void ModelCanvas::upload()
     uploadTextures();
     m_vertices.bind();
     m_vertices.allocate(interleaved.data(), static_cast<int>(interleaved.size() * sizeof(float)));
+    m_rest = std::move(interleaved);
+    m_poseDirty = !m_boneMatrices.empty();
     m_triangles.bind();
     m_triangles.allocate(mesh.indices.data(), static_cast<int>(mesh.indices.size() * sizeof(std::uint32_t)));
 
@@ -434,6 +440,59 @@ void ModelCanvas::upload()
     m_gridLines.bind();
     m_gridLines.allocate(m_gridData.data(), static_cast<int>(m_gridData.size() * sizeof(float)));
     m_hasGeometry = true;
+}
+
+void ModelCanvas::setSkinning(std::vector<Influence> influences)
+{
+    m_influences = std::move(influences);
+    m_poseDirty = true;
+    update();
+}
+
+void ModelCanvas::setBoneMatrices(std::vector<Matrix43> matrices)
+{
+    m_boneMatrices = std::move(matrices);
+    m_poseDirty = true;
+    update();
+}
+
+void ModelCanvas::applyPose()
+{
+    m_poseDirty = false;
+    if (m_rest.empty())
+        return;
+    std::vector<float> posed = m_rest;
+    const std::size_t count = std::min(m_influences.size(), posed.size() / 8);
+    for (std::size_t v = 0; v < count; ++v) {
+        const Influence& in = m_influences[v];
+        if (in.bone[0] < 0)
+            continue;
+        float* out = &posed[8 * v];
+        const std::array<float, 3> p{out[0], out[1], out[2]}, n{out[3], out[4], out[5]};
+        std::array<float, 3> sp{}, sn{};
+        float total = 0;
+        for (int k = 0; k < 4; ++k) {
+            const int b = in.bone[k];
+            if (b < 0 || static_cast<std::size_t>(b) >= m_boneMatrices.size() || in.weight[k] <= 0)
+                continue;
+            const auto q = anim::apply(m_boneMatrices[static_cast<std::size_t>(b)], p);
+            const auto r = anim::rotate(m_boneMatrices[static_cast<std::size_t>(b)], n);
+            for (int c = 0; c < 3; ++c) {
+                sp[c] += q[c] * in.weight[k];
+                sn[c] += r[c] * in.weight[k];
+            }
+            total += in.weight[k];
+        }
+        if (total <= 0)
+            continue;
+        const float len = std::sqrt(sn[0] * sn[0] + sn[1] * sn[1] + sn[2] * sn[2]);
+        for (int c = 0; c < 3; ++c) {
+            out[c] = sp[c] / total;
+            out[3 + c] = len > 0 ? sn[c] / len : n[c];
+        }
+    }
+    m_vertices.bind();
+    m_vertices.write(0, posed.data(), static_cast<int>(posed.size() * sizeof(float)));
 }
 
 void ModelCanvas::releaseTextures()
@@ -507,6 +566,8 @@ void ModelCanvas::paintGL()
         upload();
     if (!m_hasGeometry)
         return;
+    if (m_poseDirty)
+        applyPose();
     const Mesh& mesh = *m_mesh;
     const bool dark = background.lightnessF() < 0.5;
 
@@ -760,7 +821,11 @@ ModelView::ModelView(QWidget* parent)
       m_wireframe(new QCheckBox(tr("Wireframe"), this)), m_grid(new QCheckBox(tr("Grid"), this)),
       m_shadow(new QCheckBox(tr("Shadow"), this)), m_collision(new QCheckBox(tr("Collision"), this)),
       m_materials(new QCheckBox(tr("Materials"), this)),
-      m_paint(new QToolButton(this)), m_textures(new QToolButton(this)), m_lod(new QComboBox(this))
+      m_paint(new QToolButton(this)), m_textures(new QToolButton(this)), m_lod(new QComboBox(this)),
+      m_animationBar(new QWidget(this)), m_skeletonLabel(new QLabel(this)), m_chooseAnimation(new QToolButton(this)),
+      m_stepBack(new QToolButton(this)), m_playBack(new QToolButton(this)), m_pause(new QToolButton(this)),
+      m_playForward(new QToolButton(this)), m_stepForward(new QToolButton(this)), m_speed(new QComboBox(this)),
+      m_timeline(new QSlider(Qt::Horizontal, this)), m_frameLabel(new QLabel(this)), m_timer(new QTimer(this))
 {
     m_info->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
@@ -861,8 +926,15 @@ ModelView::ModelView(QWidget* parent)
     m_textures->setVisible(false);
     connect(m_textures, &QToolButton::clicked, this, &ModelView::texturesRequested);
 
+    // The 3D view with the animation controls under it (the parts list keeps its full height).
+    auto* viewArea = new QWidget(this);
+    auto* viewLayout = new QVBoxLayout(viewArea);
+    viewLayout->setContentsMargins(0, 0, 0, 0);
+    viewLayout->setSpacing(0);
+    viewLayout->addWidget(m_canvas, 1);
+    viewLayout->addWidget(m_animationBar);
     m_splitter->addWidget(m_parts);
-    m_splitter->addWidget(m_canvas);
+    m_splitter->addWidget(viewArea);
     m_splitter->setStretchFactor(0, 0);
     m_splitter->setStretchFactor(1, 1);
     m_splitter->setChildrenCollapsible(true);
@@ -887,6 +959,72 @@ ModelView::ModelView(QWidget* parent)
     bar->addWidget(m_lod);
     bar->addWidget(reset);
 
+    // Animation bar: shown when the model has a skeleton.
+    m_skeletonLabel->setForegroundRole(QPalette::PlaceholderText);
+    m_chooseAnimation->setText(tr("Animation…"));
+    m_chooseAnimation->setIcon(icons::forCategory(FileCategory::Animation));
+    m_chooseAnimation->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_chooseAnimation->setAutoRaise(true);
+    m_chooseAnimation->setToolTip(tr("Choose one of the game's animations for this skeleton"));
+    connect(m_chooseAnimation, &QToolButton::clicked, this, &ModelView::animationRequested);
+    const QIcon playIcon = icons::theme(QIcon::ThemeIcon::MediaPlaybackStart, QStyle::SP_MediaPlay);
+    const QPixmap playPixmap = playIcon.pixmap(QSize(32, 32));
+    const auto button = [&](QToolButton* b, const QIcon& icon, const QString& tip) {
+        b->setIcon(icon);
+        b->setToolTip(tip);
+        b->setAutoRaise(true);
+    };
+    button(m_stepBack, icons::theme(QIcon::ThemeIcon::MediaSkipBackward, QStyle::SP_MediaSkipBackward),
+           tr("One frame back"));
+    button(m_playBack, QIcon(playPixmap.transformed(QTransform().scale(-1, 1))), tr("Play backwards"));
+    button(m_pause, icons::theme(QIcon::ThemeIcon::MediaPlaybackPause, QStyle::SP_MediaPause), tr("Pause"));
+    button(m_playForward, playIcon, tr("Play"));
+    button(m_stepForward, icons::theme(QIcon::ThemeIcon::MediaSkipForward, QStyle::SP_MediaSkipForward),
+           tr("One frame forward"));
+    for (auto* b : {m_playBack, m_pause, m_playForward})
+        b->setCheckable(true);
+    connect(m_stepBack, &QToolButton::clicked, this, [this] { step(-1); });
+    connect(m_stepForward, &QToolButton::clicked, this, [this] { step(1); });
+    connect(m_playBack, &QToolButton::clicked, this, [this] { play(-1); });
+    connect(m_pause, &QToolButton::clicked, this, [this] { play(0); });
+    connect(m_playForward, &QToolButton::clicked, this, [this] { play(1); });
+    for (const double speed : {0.1, 0.25, 0.5, 1.0, 2.0, 4.0})
+        m_speed->addItem(QStringLiteral("%1×").arg(QLocale().toString(speed)), speed);
+    m_speed->setCurrentIndex(m_speed->findData(settings.value("preview/model/animationSpeed", 1.0).toDouble()));
+    if (m_speed->currentIndex() < 0)
+        m_speed->setCurrentIndex(3);
+    m_speed->setToolTip(tr("Playback speed"));
+    connect(m_speed, &QComboBox::currentIndexChanged, this,
+            [this] { QSettings().setValue("preview/model/animationSpeed", m_speed->currentData()); });
+    m_timeline->setToolTip(tr("Frame"));
+    connect(m_timeline, &QSlider::valueChanged, this, [this](int frame) {
+        if (m_direction == 0 || m_timeline->isSliderDown())
+            showFrame(static_cast<float>(frame));
+    });
+    connect(m_timeline, &QSlider::sliderPressed, this, [this] { play(0); });
+    m_frameLabel->setMinimumWidth(m_frameLabel->fontMetrics().horizontalAdvance(QStringLiteral("0000 / 0000")));
+    m_frameLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_timer->setInterval(16);
+    connect(m_timer, &QTimer::timeout, this, [this] {
+        if (!m_animation || m_direction == 0)
+            return;
+        const float seconds = static_cast<float>(m_clock.restart()) / 1000.0f;
+        showFrame(m_frame + static_cast<float>(m_direction) * m_speed->currentData().toFloat() * m_animation->fps
+                                * seconds);
+    });
+
+    auto* animationRow = new QHBoxLayout(m_animationBar);
+    animationRow->setContentsMargins(8, 4, 8, 4);
+    animationRow->addWidget(m_skeletonLabel);
+    animationRow->addWidget(m_chooseAnimation);
+    animationRow->addSpacing(8);
+    for (auto* b : {m_stepBack, m_playBack, m_pause, m_playForward, m_stepForward})
+        animationRow->addWidget(b);
+    animationRow->addWidget(m_speed);
+    animationRow->addWidget(m_timeline, 1);
+    animationRow->addWidget(m_frameLabel);
+    m_animationBar->setVisible(false);
+
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
@@ -894,10 +1032,149 @@ ModelView::ModelView(QWidget* parent)
     layout->addWidget(m_splitter, 1);
 }
 
+void ModelView::setSkeleton(std::shared_ptr<const Skeleton> skeleton, const QString& source)
+{
+    play(0);
+    m_skeleton = std::move(skeleton);
+    m_animation.reset();
+    m_frame = 0;
+    m_skeletonLabel->setText(m_skeleton ? tr("Skeleton: %1").arg(QFileInfo(source).completeBaseName().isEmpty()
+                                                                      ? source
+                                                                      : QFileInfo(source).completeBaseName())
+                                        : QString());
+    m_skeletonLabel->setToolTip(m_skeleton ? tr("Posed with %1 (%n bone(s))", nullptr,
+                                                static_cast<int>(m_skeleton->bones.size()))
+                                                 .arg(source)
+                                           : QString());
+    buildInfluences();
+    updateAnimationBar();
+    showFrame(0);
+}
+
+void ModelView::setAnimation(std::shared_ptr<const Animation> animation, const QString& source)
+{
+    play(0);
+    m_animation = std::move(animation);
+    m_frame = 0;
+    m_chooseAnimation->setText(m_animation ? QFileInfo(source).fileName() : tr("Animation…"));
+    QString tip = m_animation ? tr("%1\n%n frame(s) at %2 per second", nullptr, static_cast<int>(m_animation->frameCount))
+                                    .arg(source)
+                                    .arg(QLocale().toString(m_animation->fps))
+                              : tr("Choose one of the game's animations for this skeleton");
+    if (m_animation)
+        for (const std::string& note : m_animation->notes)
+            tip += QStringLiteral("\n") + toQString(note);
+    m_chooseAnimation->setToolTip(tip);
+    updateAnimationBar();
+    showFrame(0);
+}
+
+void ModelView::buildInfluences()
+{
+    if (!m_mesh || !m_skeleton) {
+        m_canvas->setSkinning({});
+        m_canvas->setBoneMatrices({});
+        return;
+    }
+    const Mesh& mesh = *m_mesh;
+    std::vector<ModelCanvas::Influence> influences(mesh.vertexCount());
+    // A rigid part follows the bone of its node, or of the nearest node above it that has one.
+    std::vector<int> nodeBone(mesh.nodes.size(), -1);
+    for (std::size_t n = 0; n < mesh.nodes.size(); ++n) {
+        int at = static_cast<int>(n);
+        for (int guard = 0; at >= 0 && guard < 64 && nodeBone[n] < 0; ++guard) {
+            nodeBone[n] = m_skeleton->find(mesh.nodes[static_cast<std::size_t>(at)].name);
+            at = mesh.nodes[static_cast<std::size_t>(at)].parent;
+        }
+    }
+    const bool skin = mesh.boneSlots.size() >= 4 * mesh.vertexCount() && mesh.boneWeights.size() == mesh.boneSlots.size();
+    for (const Mesh::Part& part : mesh.parts) {
+        std::vector<int> palette;
+        for (const std::string& bone : part.bones)
+            palette.push_back(m_skeleton->find(bone));
+        const int rigid = part.node >= 0 && static_cast<std::size_t>(part.node) < nodeBone.size()
+                              ? nodeBone[static_cast<std::size_t>(part.node)]
+                              : -1;
+        for (const Mesh::Range& range : part.lods)
+            for (std::uint32_t i = range.firstIndex; i < range.firstIndex + range.indexCount && i < mesh.indices.size();
+                 ++i) {
+                const std::uint32_t v = mesh.indices[i];
+                if (v >= influences.size())
+                    continue;
+                ModelCanvas::Influence& in = influences[v];
+                if (!palette.empty() && skin) {
+                    for (int k = 0; k < 4; ++k) {
+                        const std::uint8_t slot = mesh.boneSlots[4 * v + k];
+                        in.bone[k] = slot < palette.size() ? palette[slot] : -1;
+                        in.weight[k] = mesh.boneWeights[4 * v + k];
+                    }
+                } else if (rigid >= 0) {
+                    in = {{rigid, -1, -1, -1}, {1, 0, 0, 0}};
+                }
+            }
+    }
+    m_canvas->setSkinning(std::move(influences));
+}
+
+void ModelView::updateAnimationBar()
+{
+    m_animationBar->setVisible(m_skeleton != nullptr);
+    const bool frames = m_animation && m_animation->frameCount > 1;
+    for (QWidget* w : std::initializer_list<QWidget*>{m_stepBack, m_playBack, m_pause, m_playForward, m_stepForward,
+                                                      m_speed, m_timeline})
+        w->setEnabled(frames);
+    const QSignalBlocker block(m_timeline);
+    m_timeline->setRange(0, frames ? static_cast<int>(m_animation->frameCount) - 1 : 0);
+}
+
+void ModelView::showFrame(float frame)
+{
+    if (!m_skeleton)
+        return;
+    const float last = m_animation ? static_cast<float>(m_animation->frameCount) - 1 : 0;
+    if (last > 0) {
+        frame = std::fmod(frame, last + 1);
+        if (frame < 0)
+            frame += last + 1;
+    } else {
+        frame = 0;
+    }
+    m_frame = frame;
+    const auto locals = anim::sample(*m_skeleton, m_animation.get(), frame);
+    m_canvas->setBoneMatrices(anim::skinMatrices(*m_skeleton, anim::worldMatrices(*m_skeleton, locals)));
+    {
+        const QSignalBlocker block(m_timeline);
+        m_timeline->setValue(static_cast<int>(frame));
+    }
+    m_frameLabel->setText(m_animation ? QStringLiteral("%1 / %2").arg(static_cast<int>(frame)).arg(static_cast<int>(last))
+                                      : QString());
+}
+
+void ModelView::play(int direction)
+{
+    m_direction = m_animation && m_animation->frameCount > 1 ? direction : 0;
+    m_playBack->setChecked(m_direction < 0);
+    m_pause->setChecked(m_direction == 0);
+    m_playForward->setChecked(m_direction > 0);
+    if (m_direction != 0) {
+        m_clock.start();
+        m_timer->start();
+    } else {
+        m_timer->stop();
+    }
+}
+
+void ModelView::step(int frames)
+{
+    play(0);
+    showFrame(std::round(m_frame) + static_cast<float>(frames));
+}
+
 void ModelView::setMesh(std::shared_ptr<const Mesh> mesh)
 {
     m_mesh = std::move(mesh);
     m_canvas->setMesh(m_mesh);
+    setSkeleton(nullptr, {});
     {
         const QSignalBlocker block(m_lod);
         m_lod->clear();

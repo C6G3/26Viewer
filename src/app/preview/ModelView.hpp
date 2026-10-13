@@ -1,5 +1,6 @@
 #pragma once
 
+#include "viewer/core/Animation.hpp"
 #include "viewer/core/Mesh.hpp"
 
 #include <QMatrix4x4>
@@ -7,6 +8,7 @@
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLWidget>
+#include <QElapsedTimer>
 #include <QVector3D>
 #include <QWidget>
 
@@ -18,7 +20,9 @@ class QColor;
 class QComboBox;
 class QToolButton;
 class QLabel;
+class QSlider;
 class QSplitter;
+class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -53,6 +57,16 @@ public:
     void setPaintColor(const QColor& color);
     void resetView();
 
+    /// Up to four bones moving a vertex (index into the bone matrices; -1: none).
+    struct Influence {
+        std::array<int, 4> bone{-1, -1, -1, -1};
+        std::array<float, 4> weight{0, 0, 0, 0};
+    };
+    /// Per Mesh vertex (empty: nothing moves).
+    void setSkinning(std::vector<Influence> influences);
+    /// Skinning matrices (Skeleton bones) the vertices are posed with.
+    void setBoneMatrices(std::vector<Matrix43> matrices);
+
 protected:
     void initializeGL() override;
     void paintGL() override;
@@ -75,6 +89,8 @@ private:
     [[nodiscard]] QMatrix4x4 viewMatrix() const;
     [[nodiscard]] bool partVisible(std::size_t part) const;
     void bindVertices(QOpenGLBuffer& buffer);
+    /// Moves the vertices to the current bone matrices (from the rest data).
+    void applyPose();
 
     std::shared_ptr<const Mesh> m_mesh;
     bool m_dirty = false;
@@ -85,6 +101,10 @@ private:
     std::vector<int> m_partTexture; ///< Per part: the texture it's coloured with (Mesh::textures), or -1.
     std::vector<GLuint> m_glTextures;
     std::vector<bool> m_textureAlpha; ///< Per texture: has see-through pixels.
+    std::vector<float> m_rest;            ///< Uploaded vertex data at rest (posing starts from it).
+    std::vector<Influence> m_influences;
+    std::vector<Matrix43> m_boneMatrices;
+    bool m_poseDirty = false;
     bool m_solid = true;
     bool m_wireframe = false;
     bool m_grid = true;
@@ -124,10 +144,19 @@ public:
     explicit ModelView(QWidget* parent = nullptr);
     void setMesh(std::shared_ptr<const Mesh> mesh);
     void clear();
+    /// The skeleton the model is posed with (null: none; the animation bar hides).
+    void setSkeleton(std::shared_ptr<const Skeleton> skeleton, const QString& source);
+    /// The animation to play (null: rest pose). Doesn't start playing.
+    void setAnimation(std::shared_ptr<const Animation> animation, const QString& source);
+    [[nodiscard]] const std::shared_ptr<const Skeleton>& skeleton() const noexcept { return m_skeleton; }
+    /// Moves the animation to `frame` (paused).
+    void showAnimationFrame(float frame) { showFrame(frame); }
 
 signals:
     /// "Textures": open the window listing the textures stored in the model.
     void texturesRequested();
+    /// "Animation…": choose an animation for the skeleton.
+    void animationRequested();
 
 private:
     void buildTree();
@@ -140,6 +169,12 @@ private:
     /// Ticks or unticks every collision shape of the model (the "Collision" box).
     void setCollisionShown(bool on);
     void updatePaintButton();
+    void buildInfluences();
+    void updateAnimationBar();
+    /// Poses the model at `frame` and moves the timeline there.
+    void showFrame(float frame);
+    void play(int direction);
+    void step(int frames);
 
     std::shared_ptr<const Mesh> m_mesh;
     ModelCanvas* m_canvas;
@@ -157,6 +192,25 @@ private:
     QComboBox* m_lod;
     std::vector<QTreeWidgetItem*> m_partItems; ///< Per Mesh part.
     bool m_updatingTree = false;
+
+    // Animation
+    std::shared_ptr<const Skeleton> m_skeleton;
+    std::shared_ptr<const Animation> m_animation;
+    QWidget* m_animationBar;
+    QLabel* m_skeletonLabel;
+    QToolButton* m_chooseAnimation;
+    QToolButton* m_stepBack;
+    QToolButton* m_playBack;
+    QToolButton* m_pause;
+    QToolButton* m_playForward;
+    QToolButton* m_stepForward;
+    QComboBox* m_speed;
+    QSlider* m_timeline;
+    QLabel* m_frameLabel;
+    QTimer* m_timer;
+    QElapsedTimer m_clock;
+    float m_frame = 0;
+    int m_direction = 0; ///< 1 playing forwards, -1 backwards, 0 paused.
 };
 
 } // namespace viewer::app

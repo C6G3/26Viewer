@@ -71,10 +71,12 @@ struct VertexBuffer {
     int normalAt = -1;       ///< Byte offset of the normal within a vertex (-1: none).
     int uvAt = -1;           ///< Byte offset of the first texture coordinates (-1: none).
     std::uint32_t uvType = 0;
+    int slotsAt = -1;        ///< Skinning: four bone slots (bytes), or -1.
+    int weightsAt = -1;      ///< Skinning: four weights (bytes, 0..255), or -1.
 };
 
 // Vertex element type codes (see the comment at the top).
-constexpr std::uint32_t kFloat3 = 0x06, kFloat4 = 0x07, kHalf2 = 0x08, kHalf4 = 0x09, kUByte4N = 0x0B;
+constexpr std::uint32_t kFloat3 = 0x06, kFloat4 = 0x07, kHalf2 = 0x08, kHalf4 = 0x09, kUByte4 = 0x0A, kUByte4N = 0x0B;
 
 struct Draw {
     std::size_t at = 0; ///< File position of the record (groups are consecutive records).
@@ -170,6 +172,7 @@ struct Group {
     int element = -1;            ///< MdlDat element it belongs to (its name and placement).
     std::uint32_t material = 0;  ///< Material slot.
     int values = -1;             ///< Its material's values (index into the value table), or -1.
+    std::vector<int> passValues; ///< Every pass's values (the first is `values`; skinned parts keep their bones in another).
     std::uint32_t highestIndex = 0;
     std::uint64_t vertexRange = 0; ///< max(minIndex + vertexCount)
 };
@@ -311,6 +314,10 @@ void readVertexElements(const Scanner& s, std::size_t p, std::uint32_t n, Vertex
                    && ((type == kHalf2 || type == kHalf4) ? space >= 4 : (type == kFloat3 || type == kFloat4) && space >= 8)) {
             vb.uvAt = vb.offsets[i];
             vb.uvType = type;
+        } else if (space >= 4 && type == kUByte4 && ((usage == 5 && index == 3) || usage == 2)) {
+            vb.slotsAt = vb.offsets[i]; // skinned characters keep bone slots and weights as texture sets 3 and 4
+        } else if (space >= 4 && type == kUByte4N && ((usage == 5 && index == 4) || usage == 1)) {
+            vb.weightsAt = vb.offsets[i];
         }
     }
 }
@@ -379,6 +386,8 @@ struct RenderListEntry {
 struct MaterialValues {
     std::vector<Mesh::TextureSlot> textures;
     std::vector<Mesh::Constant> constants;
+    std::vector<std::uint32_t> palette; ///< "g_mPalette": the bones of a skinned part (DATA_INDEX numbers).
+    std::vector<std::string> bones;      ///< The palette's bone names (filled in by readMaterials).
 };
 
 /// Where a TEXTURE_INDEX points (Blur.exe builds this table in FUN_006cd820):
@@ -410,6 +419,8 @@ std::optional<std::string> stringAt(const Scanner& s, ByteSpan d, std::size_t p)
     return out;
 }
 
+std::vector<RenderListEntry> readRenderListAt(const Scanner& s, ByteSpan d, std::size_t p, std::size_t& end);
+
 /// The render list; `end` is set to where it stops.
 std::vector<RenderListEntry> readRenderList(const Scanner& s, ByteSpan d, std::size_t arch, std::size_t& end)
 {
@@ -424,6 +435,12 @@ std::vector<RenderListEntry> readRenderList(const Scanner& s, ByteSpan d, std::s
                 break;
     if (p + 16 > d.size() || p >= cls + 0x400)
         return {};
+    return readRenderListAt(s, d, p, end);
+}
+
+/// A render list from its header at `p` ("RA" 00 00, u32 count, entries).
+std::vector<RenderListEntry> readRenderListAt(const Scanner& s, ByteSpan d, std::size_t p, std::size_t& end)
+{
     const std::uint32_t count = s.u32(p + 4);
     p += 8;
     std::vector<RenderListEntry> entries;
@@ -466,6 +483,29 @@ std::vector<RenderListEntry> readRenderList(const Scanner& s, ByteSpan d, std::s
     return entries;
 }
 
+/// The animated data a DATA_INDEX names: a second list in the same layout whose
+/// entry 0 is "Element" and whose "AnimatedParam" entries name a bone (their
+/// one input). Returns the bone name per entry ("" for others).
+std::vector<std::string> readDataNames(const Scanner& s, ByteSpan d, std::size_t from)
+{
+    static constexpr char kElement[] = {7, 0, 0, 0, 'E', 'l', 'e', 'm', 'e', 'n', 't'};
+    const std::string_view hay(reinterpret_cast<const char*>(d.data()), d.size());
+    for (std::size_t at = hay.find({kElement, sizeof kElement}, from); at != std::string_view::npos;
+         at = hay.find({kElement, sizeof kElement}, at + 1)) {
+        if (at < 12 || !s.isRA(at - 4, 0) || !s.isRA(at - 12, 0))
+            continue;
+        std::size_t end = 0;
+        const std::vector<RenderListEntry> entries = readRenderListAt(s, d, at - 12, end);
+        if (entries.empty())
+            continue;
+        std::vector<std::string> names;
+        for (const RenderListEntry& e : entries)
+            names.push_back(e.effect == "AnimatedParam" && !e.inputs.empty() ? e.inputs.front().name : std::string{});
+        return names;
+    }
+    return {};
+}
+
 /// Reads count value sets at `p`; empty when they don't parse or their sizes
 /// don't add up to `bytes`.
 std::vector<MaterialValues> readValueSets(const Scanner& s, ByteSpan d, const std::vector<RenderListEntry>& entries,
@@ -486,6 +526,8 @@ std::vector<MaterialValues> readValueSets(const Scanner& s, ByteSpan d, const st
                 if (input.type == kDataIndex) {
                     if (!s.isRA(p, 0) || p + 12 > d.size())
                         return {};
+                    if (input.name == "g_mPalette")
+                        values.palette.push_back(s.u32(p + 4));
                     p += 12;
                     continue;
                 }
@@ -567,8 +609,15 @@ Materials readMaterials(const Scanner& s, ByteSpan d, std::size_t arch)
         if (s.u32(p + 16) >= entries.size())
             continue;
         std::size_t after = 0;
-        if (auto sets = readValueSets(s, d, entries, p + 16, count, bytes, after); sets.size() == count)
+        if (auto sets = readValueSets(s, d, entries, p + 16, count, bytes, after); sets.size() == count) {
+            if (std::ranges::any_of(sets, [](const MaterialValues& v) { return !v.palette.empty(); })) {
+                const std::vector<std::string> names = readDataNames(s, d, end);
+                for (MaterialValues& v : sets)
+                    for (const std::uint32_t n : v.palette)
+                        v.bones.push_back(n < names.size() ? names[n] : std::string{});
+            }
             return {std::move(sets), readTextureSources(s, d, after)};
+        }
     }
     return {};
 }
@@ -812,6 +861,10 @@ void placePart(Mesh& mesh, Mesh::Part& part, const Element& e)
                 mesh.normals.insert(mesh.normals.end(), {n[0], n[1], n[2]});
                 const float u = mesh.uvs[2 * v], uv = mesh.uvs[2 * v + 1];
                 mesh.uvs.insert(mesh.uvs.end(), {u, uv});
+                for (int k = 0; k < 4; ++k) {
+                    mesh.boneSlots.push_back(mesh.boneSlots[4 * v + k]);
+                    mesh.boneWeights.push_back(mesh.boneWeights[4 * v + k]);
+                }
             }
             mesh.indices[i] = it->second;
         }
@@ -959,9 +1012,16 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
             if (end + 28 <= d.size() && s.isRA(end, 0) && s.isRA(end + 8, 0) && s.u32(end + 4) >= 1
                 && s.u32(end + 4) <= 4) {
                 g.stream = Stream{s.u32(end + 12), s.u32(end + 20)};
-                // The first pass's material values: "RA" 00 00, u32 value set, u32 0.
-                if (end + 40 <= d.size() && s.isRA(end + 28, 0) && s.u32(end + 36) == 0)
-                    g.values = static_cast<int>(s.u32(end + 32));
+                // Per pass (u32 at end + 4): a stream record and the pass's material
+                // values, "RA" 00 00, u32 value set, u32 0 — 32 bytes in all.
+                for (std::uint32_t pass = 0; pass < s.u32(end + 4); ++pass) {
+                    const std::size_t at = end + 28 + 32 * std::size_t{pass};
+                    if (at + 12 > d.size() || !s.isRA(at, 0) || s.u32(at + 8) != 0)
+                        break;
+                    g.passValues.push_back(static_cast<int>(s.u32(at + 4)));
+                }
+                if (!g.passValues.empty())
+                    g.values = g.passValues.front();
             }
             // Before the group: "RA" 01 00, u32 material, u32 ?, u32 ?, u32 ?, u32 element
             // (low 16 bits; the high bits are flags).
@@ -983,10 +1043,14 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
     Mesh mesh;
     mesh.leftHanded = true; // Direct3D
     const std::vector<Element> elements = readElements(d);
-    for (const Element& e : elements)
-        mesh.nodes.push_back({e.name, e.parent});
+    for (const Element& e : elements) {
+        Mesh::Node node{e.name, e.parent};
+        std::copy(std::begin(e.rotation), std::end(e.rotation), node.transform.begin());
+        std::copy(std::begin(e.position), std::end(e.position), node.transform.begin() + 9);
+        mesh.nodes.push_back(std::move(node));
+    }
     std::map<std::size_t, std::uint32_t> baseVertex; // vb index -> first vertex in mesh.positions
-    bool hasNormals = false, hasUvs = false; // normals/uvs stay the same length as positions until the end
+    bool hasNormals = false, hasUvs = false, hasSkin = false; // these stay as long as positions until the end
     const std::vector<std::string> shaders = readShaderNames(s, d, arch);
     const Materials materials = readMaterials(s, d, arch);
     const std::vector<MaterialValues>& materialValues = materials.sets;
@@ -1025,6 +1089,17 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
                 hasUvs = true;
             } else {
                 mesh.uvs.insert(mesh.uvs.end(), {0.0f, 0.0f});
+            }
+            if (vb.slotsAt >= 0 && vb.weightsAt >= 0) {
+                for (int k = 0; k < 4; ++k) {
+                    mesh.boneSlots.push_back(std::to_integer<std::uint8_t>(d[at + static_cast<std::size_t>(vb.slotsAt) + k]));
+                    mesh.boneWeights.push_back(
+                        std::to_integer<std::uint8_t>(d[at + static_cast<std::size_t>(vb.weightsAt) + k]) / 255.0f);
+                }
+                hasSkin = true;
+            } else {
+                mesh.boneSlots.insert(mesh.boneSlots.end(), {0, 0, 0, 0});
+                mesh.boneWeights.insert(mesh.boneWeights.end(), {0.0f, 0.0f, 0.0f, 0.0f});
             }
         }
         baseVertex[vbIndex] = base;
@@ -1121,6 +1196,9 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
             part.textures = materialValues[static_cast<std::size_t>(group.values)].textures;
             part.constants = materialValues[static_cast<std::size_t>(group.values)].constants;
         }
+        for (const int set : group.passValues)
+            if (set >= 0 && static_cast<std::size_t>(set) < materialValues.size() && part.bones.empty())
+                part.bones = materialValues[static_cast<std::size_t>(set)].bones;
         if (named && !elements[static_cast<std::size_t>(group.element)].isIdentity())
             placePart(mesh, part, elements[static_cast<std::size_t>(group.element)]);
         mesh.parts.push_back(std::move(part));
@@ -1131,6 +1209,10 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
         mesh.normals.clear();
     if (!hasUvs)
         mesh.uvs.clear();
+    if (!hasSkin || std::ranges::none_of(mesh.parts, [](const Mesh::Part& p) { return !p.bones.empty(); })) {
+        mesh.boneSlots.clear();
+        mesh.boneWeights.clear();
+    }
     mesh.textures = readTextures(s, d, arch);
     // Texture indices go through the texture table to the stored textures (one
     // that didn't decode is kept empty, so positions line up). Without a table

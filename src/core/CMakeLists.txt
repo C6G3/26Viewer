@@ -3,6 +3,7 @@
 # (command-line tools, tests, future front-ends).
 
 add_library(viewer_core STATIC
+    include/viewer/core/Animation.hpp
     include/viewer/core/Archive.hpp
     include/viewer/core/Audio.hpp
     include/viewer/core/ByteSource.hpp
@@ -19,6 +20,7 @@ add_library(viewer_core STATIC
     include/viewer/core/RandomAccessFile.hpp
     include/viewer/core/Text.hpp
     include/viewer/core/Vfs.hpp
+    src/Animation.cpp
     src/Archive.cpp
     src/Audio.cpp
     src/ByteSource.cpp

@@ -1,7 +1,9 @@
 #include "PreviewPane.hpp"
 
 #include "../BackupBanner.hpp"
+#include "../BusyOverlay.hpp"
 #include "../QtConvert.hpp"
+#include "AnimationSupport.hpp"
 #include "HexView.hpp"
 #include "ImageView.hpp"
 #include "ModelView.hpp"
@@ -51,6 +53,7 @@ struct PreviewResult {
 
     std::shared_ptr<const Mesh> mesh;
     QString meshError;
+    SkeletonMatch skeleton; ///< The skeleton (and own animation) the model is posed with.
 
     std::shared_ptr<const SoundBank> bank;
     bool bankRebuildable = false; ///< Its sounds can be replaced (not a plain .wav).
@@ -189,9 +192,10 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
 
     // 3D model
     if (const MeshDecoder* decoder = session->content.findMeshDecoder(ext, span)) {
-        if (auto mesh = decoder->decode(span))
+        if (auto mesh = decoder->decode(span)) {
             r->mesh = std::make_shared<const Mesh>(std::move(*mesh));
-        else
+            r->skeleton = findSkeleton(*session, *node, *r->mesh);
+        } else
             r->meshError = toQString(mesh.error().message);
     }
 
@@ -259,6 +263,7 @@ PreviewPane::PreviewPane(QWidget* parent)
     connect(m_text, &TextView::editRequested, this, &PreviewPane::editRequested);
     connect(m_bankView, &SoundBankView::replaceSoundRequested, this, &PreviewPane::replaceSoundRequested);
     connect(m_model, &ModelView::texturesRequested, this, &PreviewPane::texturesRequested);
+    connect(m_model, &ModelView::animationRequested, this, &PreviewPane::chooseAnimation);
     m_previewStack->addWidget(m_message);
     m_previewStack->addWidget(m_image);
     m_previewStack->addWidget(m_text);
@@ -308,13 +313,16 @@ PreviewPane::PreviewPane(QWidget* parent)
     layout->setSpacing(0);
     layout->addLayout(header);
     layout->addWidget(m_tabs, 1);
+    m_busy = new BusyOverlay(m_tabs);
 
     connect(m_watcher, &QFutureWatcher<std::shared_ptr<PreviewResult>>::finished, this, [this] {
         if (!m_watcher->future().isValid() || m_watcher->future().resultCount() == 0)
             return;
         const auto result = m_watcher->result();
-        if (result && result->generation == m_generation)
+        if (result && result->generation == m_generation) {
+            m_busy->stop();
             applyResult(*result);
+        }
     });
 
     showNode(nullptr);
@@ -350,6 +358,7 @@ void PreviewPane::display(const VfsNode* node, int forcedTab)
     m_node = node;
     m_forcedTab = forcedTab;
     ++m_generation;
+    m_busy->stop();
     m_image->clear();
     m_text->clear();
     m_model->clear();
@@ -385,6 +394,7 @@ void PreviewPane::display(const VfsNode* node, int forcedTab)
 
     m_subtitle->setText(QStringLiteral("%1  ·  %2").arg(toQString(type.description), toQString(node->virtualPath())));
     showMessage(tr("Loading…"));
+    m_busy->start(tr("Loading %1…").arg(toQString(node->name())));
     fillProperties(node, nullptr);
     m_watcher->setFuture(QtConcurrent::run(loadPreview, m_session, node, m_generation));
 }
@@ -414,6 +424,11 @@ void PreviewPane::applyResult(const PreviewResult& result)
         m_previewStack->setCurrentWidget(m_video);
     } else if (result.mesh) {
         m_model->setMesh(result.mesh);
+        m_pickerState = {}; // a new model: the picker starts afresh (at the model's own animation, if any)
+        m_pickerState.startFile = result.skeleton.animationSource;
+        m_model->setSkeleton(result.skeleton.skeleton, result.skeleton.source);
+        if (result.skeleton.animation)
+            m_model->setAnimation(result.skeleton.animation, result.skeleton.animationSource);
         m_previewStack->setCurrentWidget(m_model);
     } else if (!result.image.isNull()) {
         m_image->setImage(result.image, result.imageInfo);
@@ -465,6 +480,27 @@ void PreviewPane::setBackupInProgress(bool running)
 void PreviewPane::showProperties(const VfsNode* node)
 {
     display(node, PropertiesTab);
+}
+
+void PreviewPane::chooseAnimation()
+{
+    if (!m_session || !m_model->skeleton())
+        return;
+    AnimationPicker picker(m_session, m_model->skeleton(), &m_pickerState, this);
+    if (picker.exec() == QDialog::Accepted && picker.selectedNode())
+        m_model->setAnimation(picker.selectedAnimation(), toQString(picker.selectedNode()->virtualPath()));
+}
+
+bool PreviewPane::showAnimation(const QString& virtualPath, float frame)
+{
+    if (!m_session || !m_model->skeleton())
+        return false;
+    auto animation = loadAnimationAt(*m_session, virtualPath);
+    if (!animation || !anim::fits(*m_model->skeleton(), *animation))
+        return false;
+    m_model->setAnimation(std::move(animation), virtualPath);
+    m_model->showAnimationFrame(frame);
+    return true;
 }
 
 void PreviewPane::setCurrentTab(int tab)

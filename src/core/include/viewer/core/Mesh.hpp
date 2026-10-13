@@ -4,6 +4,7 @@
 #include "viewer/core/Error.hpp"
 #include "viewer/core/Image.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -43,11 +44,16 @@ struct Mesh {
         std::uint32_t color = 0; ///< 0xRRGGBB to draw it in, or 0 for the viewer's own colours.
         std::vector<TextureSlot> textures; ///< The material's textures, as the game binds them.
         std::vector<Constant> constants;   ///< The material's other settings.
+        /// Skinned parts: the bone each of its vertices' bone slots means (slot i →
+        /// the skeleton bone named bones[i]). Empty for rigid parts.
+        std::vector<std::string> bones;
     };
     /// A named node of the model's hierarchy ("e_exterior" > "e_door_left" > "e_mirror_left").
     struct Node {
         std::string name;
         int parent = -1; ///< Index into nodes, or -1 for a root.
+        /// Where the node sits in model space (row vectors: p' = p * R + t; R's rows then t).
+        std::array<float, 12> transform{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
     };
 
     /// A texture stored in the model file itself.
@@ -59,6 +65,10 @@ struct Mesh {
     std::vector<float> positions;       ///< x, y, z per vertex.
     std::vector<float> normals;         ///< x, y, z per vertex (unit length), or empty.
     std::vector<float> uvs;             ///< u, v per vertex (first UV set; v down, as in Direct3D), or empty.
+    /// Skinning, or empty: four bone slots per vertex (into its part's palette)
+    /// and their four weights (adding up to 1).
+    std::vector<std::uint8_t> boneSlots;
+    std::vector<float> boneWeights;
     std::vector<std::uint32_t> indices; ///< Three per triangle (every part at every level).
     std::vector<Part> parts;
     std::vector<Node> nodes; ///< Empty when the format has no hierarchy.

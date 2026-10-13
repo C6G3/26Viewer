@@ -10,6 +10,8 @@ qt_add_executable(viewer_app WIN32
     AssetEditor.hpp
     BackupBanner.cpp
     BackupBanner.hpp
+    BusyOverlay.cpp
+    BusyOverlay.hpp
     Extractor.cpp
     Extractor.hpp
     Exporter.cpp
@@ -37,6 +39,8 @@ qt_add_executable(viewer_app WIN32
     Theme.hpp
     VfsModel.cpp
     VfsModel.hpp
+    preview/AnimationSupport.cpp
+    preview/AnimationSupport.hpp
     preview/HexView.cpp
     preview/HexView.hpp
     preview/ImageView.cpp

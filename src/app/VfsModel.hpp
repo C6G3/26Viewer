@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Session.hpp"
+
 #include "viewer/core/ContentRegistry.hpp"
 #include "viewer/core/Vfs.hpp"
 
@@ -60,6 +62,11 @@ private:
     std::vector<Root> m_roots;
     const ContentRegistry* m_content = nullptr;
 };
+
+/// The tree's top row for a session's main mount (the game with its icon) and
+/// for something opened alongside it.
+[[nodiscard]] VfsModel::Root mainRoot(const Session& session);
+[[nodiscard]] VfsModel::Root extraRoot(const Session::Extra& extra);
 
 /// Sorting (folders first) and recursive name filtering.
 class VfsFilterModel : public QSortFilterProxyModel {

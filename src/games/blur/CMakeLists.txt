@@ -1,6 +1,8 @@
 # Blur (Bizarre Creations, 2010)
 
 add_library(viewer_game_blur STATIC
+    Animation.cpp
+    Animation.hpp
     AudioEntity.cpp
     AudioEntity.hpp
     BafBank.cpp
