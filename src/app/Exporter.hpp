@@ -36,7 +36,7 @@ QFuture<ExtractSummary> startExport(std::shared_ptr<Session> session, std::vecto
 [[nodiscard]] bool hasTextures(const Session& session, const std::vector<ExtractItem>& items);
 
 /// What Import does for `node`.
-enum class ImportKind { None, SoundBank, Texture };
+enum class ImportKind { None, SoundBank, Texture, TextureDictionary };
 /// Whether `node` can be rebuilt from exported files (Import), and how.
 [[nodiscard]] ImportKind importKind(const Session& session, const VfsNode& node);
 
@@ -86,5 +86,35 @@ Result<Picture> loadPicture(const std::filesystem::path& file);
 /// big pictures takes a moment: run it on a worker thread.
 Result<ByteBuffer> buildTextureImport(const Session& session, const VfsNode& node, const Picture& picture,
                                       image::PixelFormat format, QStringList& notes);
+
+// ---- Texture dictionaries (files holding several textures, e.g. a Blur model) ----
+
+/// The dictionary format for `node` if it holds at least one texture.
+[[nodiscard]] const TextureDictionaryFormat* textureDictionary(const Session& session, const VfsNode& node);
+
+/// Result of putting pictures into a texture dictionary.
+struct DictionaryImport {
+    ByteBuffer data;        ///< The file with the textures replaced.
+    int replaced = 0;
+    int kept = 0;           ///< Textures with no matching picture (unchanged).
+    QStringList unmatched;  ///< Pictures that match no texture.
+    QStringList failed;     ///< "name: reason".
+    QStringList notes;      ///< Scaling and conversion remarks.
+};
+
+/// The dictionary `node` with texture `index` replaced by `picture`. A
+/// dictionary texture keeps its size, pixel format and mip levels (it is
+/// written where it is), so the picture is scaled to fit and converted.
+/// Compressing takes a moment: run it on a worker thread.
+Result<DictionaryImport> planDictionaryReplace(const Session& session, const VfsNode& node, std::size_t index,
+                                               const Picture& picture);
+
+/// The pictures (name.png / .dds / .jpg / .bmp, as Export writes them) in `folder`.
+std::vector<std::filesystem::path> picturesIn(const std::filesystem::path& folder);
+
+/// The dictionary `node` with every texture that one of `pictures` is named
+/// after replaced (the others are listed as unmatched).
+Result<DictionaryImport> planDictionaryImport(const Session& session, const VfsNode& node,
+                                              const std::vector<std::filesystem::path>& pictures);
 
 } // namespace viewer::app

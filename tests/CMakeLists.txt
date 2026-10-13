@@ -7,6 +7,7 @@ add_executable(viewer_tests
     test_blur_pak.cpp
     test_blur_chunks.cpp
     test_blur_media.cpp
+    test_blur_physics.cpp
     test_media.cpp
     test_text.cpp
     test_vfs.cpp

@@ -19,9 +19,17 @@ std::size_t Mesh::triangleCount(std::size_t lod) const noexcept
 {
     std::size_t triangles = 0;
     for (const Part& part : parts)
-        if (!part.shadow && lod < part.lods.size())
+        if (!isHelper(part) && lod < part.lods.size())
             triangles += part.lods[lod].indexCount / 3;
     return triangles;
+}
+
+bool Mesh::isHelper(const Part& part) const noexcept
+{
+    if (part.shadow)
+        return true;
+    return part.collision
+           && std::ranges::any_of(parts, [](const Part& other) { return !other.shadow && !other.collision; });
 }
 
 } // namespace viewer
@@ -68,9 +76,13 @@ std::string toObj(const Mesh& mesh)
         return std::to_string(n);
     };
     for (const Mesh::Part& part : mesh.parts) {
-        if (part.shadow || part.lods.empty())
+        if (mesh.isHelper(part) || part.lods.empty())
             continue;
-        out += std::format("g {}_{}\n", part.name, part.material.empty() ? "" : part.material.substr(part.material.rfind(' ') + 1));
+        // Group names end at a space in OBJ, so spaces become underscores.
+        std::string group = std::format("{}_{}", part.name,
+                                        part.material.empty() ? "" : part.material.substr(part.material.rfind(' ') + 1));
+        std::ranges::replace(group, ' ', '_');
+        out += std::format("g {}\n", group);
         const Mesh::Range& range = part.lods.front();
         for (std::uint32_t i = range.firstIndex; i + 2 < range.firstIndex + range.indexCount; i += 3) {
             const std::uint32_t b = mesh.leftHanded ? i + 2 : i + 1, c = mesh.leftHanded ? i + 1 : i + 2;

@@ -19,6 +19,16 @@ struct Mesh {
         std::uint32_t firstIndex = 0;
         std::uint32_t indexCount = 0;
     };
+    /// A texture input of a part's material ("g_MeshTexture" → Mesh::textures[3]).
+    struct TextureSlot {
+        std::string name;  ///< The effect's parameter: "g_MeshTexture", "tAlbedo", "g_BumpTexture"...
+        int texture = -1;  ///< Index into Mesh::textures, or -1 when the file doesn't hold it.
+    };
+    /// A number (or several) the material sets in its effect ("g_vMtlParameters").
+    struct Constant {
+        std::string name;
+        std::vector<float> values;
+    };
     /// One piece of the model (one draw call / material in the game).
     struct Part {
         std::string name;        ///< "e_door_left", or "Part 12" when the file has no names
@@ -28,6 +38,11 @@ struct Mesh {
         int node = -1;           ///< Index into Mesh::nodes, or -1.
         std::vector<Range> lods; ///< [0] = most detailed. An empty range: not drawn at that level.
         bool shadow = false;     ///< A shadow hull (used for the game's shadows; hidden by default).
+        bool collision = false;  ///< A collision shape (what the game's physics touches; never drawn by the game).
+        bool startHidden = false; ///< Unticked when the model opens (e.g. a level's other route layouts).
+        std::uint32_t color = 0; ///< 0xRRGGBB to draw it in, or 0 for the viewer's own colours.
+        std::vector<TextureSlot> textures; ///< The material's textures, as the game binds them.
+        std::vector<Constant> constants;   ///< The material's other settings.
     };
     /// A named node of the model's hierarchy ("e_exterior" > "e_door_left" > "e_mirror_left").
     struct Node {
@@ -56,8 +71,13 @@ struct Mesh {
     [[nodiscard]] std::size_t vertexCount() const noexcept { return positions.size() / 3; }
     /// Number of detail levels (the most any part has).
     [[nodiscard]] std::size_t lodCount() const noexcept;
-    /// Triangles drawn at `lod`, shadow hulls not counted.
+    /// Triangles drawn at `lod`, helper parts not counted.
     [[nodiscard]] std::size_t triangleCount(std::size_t lod = 0) const noexcept;
+    /// Is the part a helper rather than the model itself: a shadow hull, or a
+    /// collision shape when the mesh also has visible geometry (a car with its
+    /// collision; a level's collision on its own is the model). Helpers start
+    /// hidden and are left out of counts and exports.
+    [[nodiscard]] bool isHelper(const Part& part) const noexcept;
 };
 
 /// Converts a file's bytes into a Mesh (game model formats).
@@ -74,7 +94,7 @@ namespace mesh {
 /// IEEE 754 half precision → float.
 [[nodiscard]] float halfToFloat(std::uint16_t h) noexcept;
 
-/// Wavefront .obj text for the most detailed level (shadow hulls left out),
+/// Wavefront .obj text for the most detailed level (helper parts left out),
 /// one group per part ("name_material"), with texture coordinates and normals
 /// when the mesh has them. Left-handed models are mirrored so they open the
 /// right way round in Blender and other right-handed tools.

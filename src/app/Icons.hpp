@@ -17,5 +17,7 @@ QIcon archive();
 QIcon forCategory(FileCategory category);
 QIcon appIcon();
 QIcon editMode();
+/// A stack of texture sheets: the 3D view's "Textures" button.
+QIcon textures();
 
 } // namespace viewer::app::icons

@@ -5,6 +5,7 @@
 #include "ChunkFile.hpp"
 #include "ModelDecoder.hpp"
 #include "PakArchive.hpp"
+#include "Physics.hpp"
 
 #include "viewer/core/GameRegistry.hpp"
 
@@ -50,6 +51,8 @@ public:
         registry.addImageDecoder(std::make_shared<TextureDecoder>());
         registry.addStructureParser(std::make_shared<ChunkStructureParser>());
         registry.addMeshDecoder(std::make_shared<ModelDecoder>());
+        registry.addMeshDecoder(std::make_shared<LevelPhysicsDecoder>());
+        registry.addTextureDictionary(std::make_shared<ModelTextureDictionary>());
         registry.addSoundBankFormat(std::make_shared<BafFormat>());
         registry.addDecompiler(std::make_shared<AudioEntityDecompiler>());
         registry.addStructureParser(std::make_shared<AudioEntityStructureParser>());
@@ -63,7 +66,7 @@ public:
         t.add({"skeleton", "Skeleton", FileCategory::Animation});
         t.add({"level", "Level definition", FileCategory::Level});
         t.add({"levelrender", "Level render data", FileCategory::Level});
-        t.add({"levelphysics", "Level physics data", FileCategory::Level});
+        t.add({"levelphysics", "Level collision (physics)", FileCategory::Level});
         t.add({"levelstream", "Level streaming archive (ARCH)", FileCategory::Level});
         t.add({"baf", "Audio bank (BANK)", FileCategory::Audio});
         t.add({"dat", "Audio/data table", FileCategory::Data});

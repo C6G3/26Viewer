@@ -10,6 +10,7 @@
 #include "Theme.hpp"
 #include "VfsModel.hpp"
 #include "PreviewWindow.hpp"
+#include "TextureBrowser.hpp"
 #include "TextEditorWindow.hpp"
 #include "preview/PreviewPane.hpp"
 
@@ -984,6 +985,11 @@ PreviewWindow* MainWindow::openPreview(const VfsNode* node, bool properties)
     });
     connect(w, &PreviewWindow::importRequested, this, [this, w] { importNode(w->node(), w); });
     connect(w, &PreviewWindow::replaceSoundRequested, this, [this, w](int index) { replaceSound(w, index); });
+    connect(w, &PreviewWindow::replaceTextureRequested, this,
+            [this, w](int index, const QString& file) { replaceTexture(w, index, file); });
+    connect(w, &PreviewWindow::importTexturesRequested, this, [this, w](const QStringList& files) {
+        importTextures(w->node(), w->textureBrowser() ? static_cast<QWidget*>(w->textureBrowser()) : w, files);
+    });
 
     updateBackupBanner();
     w->show();
@@ -1720,6 +1726,10 @@ void MainWindow::importNode(const VfsNode* node, QWidget* dialogParent)
                                  tr("Nothing can be imported into %1 yet — only sound banks and textures.").arg(name));
         return;
     }
+    if (kind == ImportKind::TextureDictionary) {
+        importTextures(node, parent, {});
+        return;
+    }
     if (!ensureEditMode())
         return;
 
@@ -1804,6 +1814,99 @@ void MainWindow::importNode(const VfsNode* node, QWidget* dialogParent)
         return;
     }
     plan->notes = built.notes;
+    confirmAndReplace(std::move(*plan), /*edited=*/false, parent);
+}
+
+void MainWindow::replaceTexture(PreviewWindow* window, int index, QString file)
+{
+    const VfsNode* node = window ? window->node() : nullptr;
+    if (!m_session || !node || index < 0 || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
+        return;
+    QWidget* parent = window->textureBrowser() ? static_cast<QWidget*>(window->textureBrowser()) : window;
+    if (!textureDictionary(*m_session, *node) || !ensureEditMode())
+        return;
+    if (file.isEmpty()) {
+        QSettings settings;
+        file = QFileDialog::getOpenFileName(
+            parent, tr("Replace the texture with…"),
+            settings.value("paths/lastImportDir", settings.value("paths/lastExtractDir")).toString(),
+            tr("Pictures (*.png *.dds *.jpg *.jpeg *.bmp);;All files (*)"));
+        if (file.isEmpty())
+            return;
+        settings.setValue("paths/lastImportDir", QFileInfo(file).absolutePath());
+    }
+    auto picture = loadPicture(toPath(file));
+    if (!picture) {
+        QMessageBox::warning(parent, tr("Replace Texture"),
+                             tr("Couldn't read %1: %2").arg(QFileInfo(file).fileName(), toQString(picture.error().message)));
+        return;
+    }
+    auto session = m_session;
+    auto result = runBusy<Result<DictionaryImport>>(
+        parent, tr("Converting %1…").arg(QFileInfo(file).fileName()),
+        [session, node, index, picture = std::move(*picture)] {
+            return planDictionaryReplace(*session, *node, static_cast<std::size_t>(index), picture);
+        });
+    confirmDictionaryImport(node, std::move(result), QFileInfo(file).fileName(), parent);
+}
+
+void MainWindow::importTextures(const VfsNode* node, QWidget* dialogParent, const QStringList& files)
+{
+    if (!m_session || !node || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
+        return;
+    QWidget* parent = dialogParent ? dialogParent : this;
+    if (!textureDictionary(*m_session, *node) || !ensureEditMode())
+        return;
+    std::vector<std::filesystem::path> pictures;
+    QString source;
+    if (files.isEmpty()) {
+        QSettings settings;
+        const QString dir = QFileDialog::getExistingDirectory(
+            parent, tr("Import into %1 the pictures from").arg(toQString(node->name())),
+            settings.value("paths/lastImportDir", settings.value("paths/lastExtractDir")).toString());
+        if (dir.isEmpty())
+            return;
+        settings.setValue("paths/lastImportDir", dir);
+        pictures = picturesIn(toPath(dir));
+        source = tr("the pictures in %1").arg(QFileInfo(dir).fileName());
+    } else {
+        for (const QString& file : files)
+            pictures.push_back(toPath(file));
+        source = files.size() == 1 ? QFileInfo(files.front()).fileName()
+                                   : tr("%n dropped picture(s)", nullptr, static_cast<int>(files.size()));
+    }
+    auto session = m_session;
+    auto result = runBusy<Result<DictionaryImport>>(parent, tr("Converting pictures for %1…").arg(toQString(node->name())),
+                                                    [session, node, pictures = std::move(pictures)] {
+                                                        return planDictionaryImport(*session, *node, pictures);
+                                                    });
+    confirmDictionaryImport(node, std::move(result), source, parent);
+}
+
+void MainWindow::confirmDictionaryImport(const VfsNode* node, Result<DictionaryImport> result, const QString& source,
+                                         QWidget* parent)
+{
+    if (!result) {
+        QMessageBox::warning(parent, tr("Textures"), toQString(result.error().message));
+        return;
+    }
+    auto plan = planReplaceData(*m_session, *node, std::move(result->data), source);
+    if (!plan) {
+        QMessageBox::warning(parent, tr("Textures"), toQString(plan.error().message));
+        return;
+    }
+    plan->notes << tr("%n texture(s) replaced", nullptr, result->replaced)
+                << tr("%n texture(s) stay as they were", nullptr, result->kept);
+    plan->notes << result->notes.mid(0, 8);
+    QStringList problems;
+    if (!result->unmatched.isEmpty())
+        problems << tr("%n picture(s) match no texture and are skipped: %1", nullptr,
+                       static_cast<int>(result->unmatched.size()))
+                        .arg(result->unmatched.mid(0, 5).join(QStringLiteral(", ")));
+    if (!result->failed.isEmpty())
+        problems << tr("%n picture(s) couldn't be used: %1", nullptr, static_cast<int>(result->failed.size()))
+                        .arg(result->failed.mid(0, 3).join(QStringLiteral("; ")));
+    plan->warning = problems.join(QStringLiteral(" "));
     confirmAndReplace(std::move(*plan), /*edited=*/false, parent);
 }
 

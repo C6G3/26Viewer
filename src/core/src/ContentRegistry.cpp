@@ -44,6 +44,19 @@ const TextDecompiler* ContentRegistry::findDecompiler(std::string_view extension
     return nullptr;
 }
 
+void ContentRegistry::addTextureDictionary(std::shared_ptr<const TextureDictionaryFormat> format)
+{
+    m_textureDictionaries.push_back(std::move(format));
+}
+
+const TextureDictionaryFormat* ContentRegistry::findTextureDictionary(std::string_view extension, ByteSpan data) const
+{
+    for (const auto& f : m_textureDictionaries | std::views::reverse)
+        if (f->canRead(extension, data))
+            return f.get();
+    return nullptr;
+}
+
 const ArchiveFormat* ContentRegistry::findArchiveFormat(const std::filesystem::path& path) const
 {
     const auto ext = extensionOf(path);

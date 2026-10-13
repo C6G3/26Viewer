@@ -43,6 +43,7 @@ public:
     /// tab used for later files).
     void showProperties(const VfsNode* node);
     [[nodiscard]] const VfsNode* node() const noexcept { return m_node; }
+    [[nodiscard]] const std::shared_ptr<Session>& session() const noexcept { return m_session; }
 
     /// Shows the red "not backed up" banner for `fileName`; an empty name hides it.
     void setBackupWarning(const QString& fileName);
@@ -58,6 +59,8 @@ signals:
     void editRequested();
     /// The user asked to replace sound `index` of the shown bank.
     void replaceSoundRequested(int index);
+    /// The 3D view's "Textures" button.
+    void texturesRequested();
 
 private:
     enum Tab { PreviewTab, StructureTab, HexTab, PropertiesTab };

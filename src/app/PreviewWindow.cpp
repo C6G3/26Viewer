@@ -2,6 +2,7 @@
 
 #include "Icons.hpp"
 #include "QtConvert.hpp"
+#include "TextureBrowser.hpp"
 #include "preview/PreviewPane.hpp"
 
 #include <QApplication>
@@ -10,6 +11,7 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPointer>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTimer>
@@ -26,6 +28,7 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     connect(m_pane, &PreviewPane::backupRequested, this, &PreviewWindow::backupRequested);
     connect(m_pane, &PreviewPane::editRequested, this, &PreviewWindow::editRequested);
     connect(m_pane, &PreviewPane::replaceSoundRequested, this, &PreviewWindow::replaceSoundRequested);
+    connect(m_pane, &PreviewPane::texturesRequested, this, &PreviewWindow::showTextures);
 
     m_revealAction = new QAction(icons::theme(TI::GoUp, QStyle::SP_FileDialogToParent), tr("Show in &List"), this);
     m_revealAction->setStatusTip(tr("Select this file in the main window"));
@@ -97,6 +100,35 @@ void PreviewWindow::showNode(const VfsNode* node, bool properties)
     m_revealAction->setEnabled(node != nullptr);
     setEditMode(m_editMode);
     updateTitle();
+    // An open Textures window follows (after a replace the file is read again).
+    if (TextureBrowser* b = textureBrowser()) {
+        if (node)
+            b->setSource(m_pane->session(), node);
+        else
+            b->close();
+    }
+}
+
+TextureBrowser* PreviewWindow::textureBrowser() const
+{
+    return findChild<TextureBrowser*>(QString(), Qt::FindDirectChildrenOnly);
+}
+
+void PreviewWindow::showTextures()
+{
+    TextureBrowser* b = textureBrowser();
+    if (!b) {
+        b = new TextureBrowser(this);
+        if (testAttribute(Qt::WA_DontShowOnScreen))
+            b->setAttribute(Qt::WA_DontShowOnScreen);
+        connect(b, &TextureBrowser::replaceRequested, this, &PreviewWindow::replaceTextureRequested);
+        connect(b, &TextureBrowser::importRequested, this, &PreviewWindow::importTexturesRequested);
+        b->setEditMode(m_editMode);
+        b->setSource(m_pane->session(), node());
+    }
+    b->show();
+    b->raise();
+    b->activateWindow();
 }
 
 const VfsNode* PreviewWindow::node() const
@@ -110,6 +142,8 @@ void PreviewWindow::setEditMode(bool on)
     const VfsNode* n = node();
     m_replaceAction->setEnabled(on && n && Vfs::canReplace(*n));
     m_importAction->setEnabled(on && n && m_importCheck && m_importCheck(n));
+    if (TextureBrowser* b = textureBrowser())
+        b->setEditMode(on);
 }
 
 void PreviewWindow::setBackupWarning(const QString& fileName)

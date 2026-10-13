@@ -14,11 +14,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <set>
 
 using namespace viewer;
 using namespace viewer::games::blur;
@@ -460,7 +462,12 @@ TEST_CASE("Real Blur models and audio banks (set BLUR_DIR to enable)")
     REQUIRE(chair);
     auto mesh = ModelDecoder().decode((*pak)->read(*chair).value());
     REQUIRE(mesh);
-    CHECK(mesh->vertexCount() == 1147);
+    std::set<std::uint32_t> drawn; // vertices of the model itself (its collision shapes come after)
+    for (const Mesh::Part& part : mesh->parts)
+        if (!mesh->isHelper(part))
+            for (std::uint32_t i = part.lods[0].firstIndex; i < part.lods[0].firstIndex + part.lods[0].indexCount; ++i)
+                drawn.insert(mesh->indices[i]);
+    CHECK(drawn.size() == 1147);
     CHECK(mesh->triangleCount() == 1004);
 
     // Part names, hierarchy and placement come from MdlDat's Element table.
@@ -491,7 +498,7 @@ TEST_CASE("Real Blur models and audio banks (set BLUR_DIR to enable)")
     REQUIRE(car->uvs.size() == 2 * car->vertexCount());
     std::size_t unit = 0, used = 0;
     for (const Mesh::Part& part : car->parts) {
-        if (part.shadow)
+        if (car->isHelper(part))
             continue;
         for (std::uint32_t i = part.lods[0].firstIndex; i < part.lods[0].firstIndex + part.lods[0].indexCount; ++i) {
             const std::uint32_t n = car->indices[i];
@@ -587,6 +594,122 @@ TEST_CASE("Every real Blur audio bank rebuilds byte for byte (set BLUR_DIR to en
         }
     }
     CHECK(checked >= 193); // every bank in the game's archives
+}
+
+TEST_CASE("Real Blur materials bind the model's own textures (set BLUR_DIR to enable)")
+{
+    const char* dir = std::getenv("BLUR_DIR");
+    if (!dir) {
+        SUCCEED("BLUR_DIR not set; skipping");
+        return;
+    }
+    auto pak = PakArchive::open(std::filesystem::path(dir) / "cache" / "root.pak");
+    REQUIRE(pak);
+    const auto entries = (*pak)->entries();
+    const auto load = [&](std::string_view suffix) {
+        const auto it = std::ranges::find_if(entries, [&](const auto& e) { return e.path.ends_with(suffix); });
+        REQUIRE(it != entries.end());
+        auto mesh = ModelDecoder().decode((*pak)->read(static_cast<std::size_t>(it - entries.begin())).value());
+        REQUIRE(mesh);
+        return std::move(*mesh);
+    };
+    const auto slot = [](const Mesh::Part& part, std::string_view name) {
+        const auto it = std::ranges::find_if(part.textures, [&](const Mesh::TextureSlot& s) { return s.name == name; });
+        return it == part.textures.end() ? -2 : it->texture;
+    };
+
+    // A lamp post: two diffuse/material pairs and a light flare, numbered in file order.
+    const Mesh lamp = load("uk_london_hackney/lampostsandtrafficlights/lamposta.model");
+    REQUIRE(lamp.textures.size() == 5);
+    CHECK(lamp.textures[4].name == "lightflare_diff");
+    const auto flare = std::ranges::find_if(lamp.parts, [](const Mesh::Part& p) { return p.shader == "LightFlare.fx"; });
+    REQUIRE(flare != lamp.parts.end());
+    CHECK(slot(*flare, "g_tColour") == 4);
+
+    // The Audi: every visible part has its material's values, and texture indices
+    // go through its texture table to keyed and streamed textures alike.
+    const Mesh audi = load("models/vehicles/audi_s3_stock.model");
+    CHECK(audi.textures.size() == 15);
+    std::size_t visible = 0, withValues = 0;
+    for (const Mesh::Part& p : audi.parts) {
+        if (audi.isHelper(p) || p.shadow)
+            continue;
+        ++visible;
+        withValues += !p.textures.empty() || !p.constants.empty();
+        for (const Mesh::TextureSlot& s : p.textures)
+            CHECK(s.texture >= 0);
+    }
+    CHECK(withValues == visible);
+    CHECK(audi.textures[0].name == "paintdent");
+    const auto named = [&](const char* shader, std::string_view slotName) -> std::string {
+        const auto part = std::ranges::find_if(audi.parts, [&](const Mesh::Part& p) { return p.shader == shader; });
+        REQUIRE(part != audi.parts.end());
+        const int t = slot(*part, slotName);
+        return t >= 0 ? audi.textures[static_cast<std::size_t>(t)].name : "";
+    };
+    CHECK(named("veh_Paint_a.fx", "g_DentTexture") == "paintdent");       // keyed
+    CHECK(named("veh_Paint_a.fx", "g_ScratchTexture") == "audis3_scratch"); // streamed
+    CHECK(named("veh_Paint_a.fx", "g_BumpTexture") == "petrol_bump");
+    CHECK(named("veh_Light_c.fx", "g_sOffTexture") == "audis3_2");
+    CHECK(named("veh_Matt_c_f_h.fx", "g_MeshTexture") == "tyretred");
+
+    // Textures that share a name stay separate (the Baja Beetle has three DefaultColours).
+    const Mesh baja = load("models/vehicles/volkswagen_beetle_offroad.model");
+    CHECK(std::ranges::count_if(baja.textures, [](const Mesh::Texture& t) { return t.name == "DefaultColour"; }) == 3);
+}
+
+TEST_CASE("Every real Blur model's textures replace in place (set BLUR_DIR to enable)")
+{
+    const char* dir = std::getenv("BLUR_DIR");
+    if (!dir) {
+        SUCCEED("BLUR_DIR not set; skipping");
+        return;
+    }
+    auto pak = PakArchive::open(std::filesystem::path(dir) / "cache" / "root.pak");
+    REQUIRE(pak);
+    const auto entries = (*pak)->entries();
+    const ModelTextureDictionary dictionary;
+    std::size_t models = 0, textures = 0;
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const std::string ext = extensionOf(entries[i].path);
+        if (ext != "model" && ext != "particlemesh")
+            continue;
+        const ByteBuffer original = (*pak)->read(i).value();
+        if (!dictionary.canRead(ext, original))
+            continue;
+        INFO(entries[i].path);
+        auto list = dictionary.list(original);
+        REQUIRE(list);
+        if (list->empty())
+            continue;
+        ++models;
+        for (std::size_t t = 0; t < list->size(); ++t) {
+            auto pixels = dictionary.surfaces(original, t);
+            REQUIRE(pixels);
+            CHECK(pixels->width == (*list)[t].width);
+            CHECK(pixels->mipCount == (*list)[t].mipCount);
+            // Writing a texture's own pixels back changes nothing...
+            auto same = dictionary.replace(original, t, *pixels);
+            REQUIRE(same);
+            CHECK(*same == original);
+            ++textures;
+        }
+        // ...and a changed texture reads back changed, everything else intact.
+        auto pixels = dictionary.surfaces(original, 0).value();
+        for (std::size_t b = 0; b < pixels.data.size(); ++b)
+            pixels.data[b] = static_cast<std::byte>(b * 7);
+        auto changed = dictionary.replace(original, 0, pixels);
+        REQUIRE(changed);
+        CHECK(changed->size() == original.size());
+        CHECK(dictionary.surfaces(*changed, 0).value().data == pixels.data);
+        if (list->size() > 1)
+            CHECK(dictionary.surfaces(*changed, 1).value().data == dictionary.surfaces(original, 1).value().data);
+        // The wrong size is refused.
+        pixels.width *= 2;
+        CHECK_FALSE(dictionary.replace(original, 0, pixels));
+    }
+    CHECK(models > 500);
+    CHECK(textures > models);
 }
 
 TEST_CASE("Every real Blur texture rebuilds byte for byte (set BLUR_DIR to enable)")

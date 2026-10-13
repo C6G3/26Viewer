@@ -317,6 +317,8 @@ ImportKind importKind(const Session& session, const VfsNode& node)
     if (const ImageDecoder* decoder = session.content.findImageDecoder(extensionOf(node.name()), *h);
         decoder && decoder->canRebuild())
         return ImportKind::Texture;
+    if (textureDictionary(session, node))
+        return ImportKind::TextureDictionary;
     return ImportKind::None;
 }
 
@@ -479,6 +481,167 @@ Result<ByteBuffer> buildTextureImport(const Session& session, const VfsNode& nod
                                  .arg(toQString(image::pixelFormatName(format))));
     }
     return t->decoder->rebuild(t->data, surfaces);
+}
+
+// ---- Texture dictionaries ---------------------------------------------------------------
+
+const TextureDictionaryFormat* textureDictionary(const Session& session, const VfsNode& node)
+{
+    if (!node.isFile())
+        return nullptr;
+    const auto h = head(session, node);
+    return h ? session.content.findTextureDictionary(extensionOf(node.name()), *h) : nullptr;
+}
+
+namespace {
+
+struct LoadedDictionary {
+    const TextureDictionaryFormat* format = nullptr;
+    ByteBuffer data;
+    std::vector<DictionaryTexture> textures;
+};
+
+Result<LoadedDictionary> loadDictionary(const Session& session, const VfsNode& node)
+{
+    LoadedDictionary d;
+    d.format = textureDictionary(session, node);
+    if (!d.format)
+        return fail(ErrorCode::Unsupported, "{} holds no textures that can be replaced", node.name());
+    auto data = session.vfs.read(node);
+    if (!data)
+        return std::unexpected(data.error());
+    d.data = std::move(*data);
+    auto list = d.format->list(d.data);
+    if (!list)
+        return std::unexpected(list.error());
+    d.textures = std::move(*list);
+    if (d.textures.empty())
+        return fail(ErrorCode::NotFound, "{} holds no textures", node.name());
+    return d;
+}
+
+/// `picture` as texture `t` will store it: its size, format and mip levels.
+Result<image::Surfaces> fitPicture(const Picture& picture, const DictionaryTexture& t, QStringList& notes)
+{
+    const QString name = toQString(t.name);
+    if (picture.dds && picture.dds->format == t.format && picture.dds->width == t.width
+        && picture.dds->height == t.height && picture.dds->layers == 1 && picture.dds->mipCount >= t.mipCount) {
+        // Already right: the .dds's own pixels, not re-compressed.
+        image::Surfaces s = *picture.dds;
+        s.mipCount = t.mipCount;
+        s.data.resize(image::chainSize(t.format, t.width, t.height, t.mipCount));
+        notes << tr("%1: the .dds is already %2, used as it is.").arg(name, toQString(image::pixelFormatName(t.format)));
+        return s;
+    }
+    if (!image::canEncode(t.format))
+        return fail(ErrorCode::Unsupported, "{} is stored as {}, which can't be written yet", t.name,
+                    image::pixelFormatName(t.format));
+    Image img = picture.image;
+    if (img.width != t.width || img.height != t.height) {
+        const QImage scaled = toQImage(img).scaled(static_cast<int>(t.width), static_cast<int>(t.height),
+                                                   Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+                                  .convertToFormat(QImage::Format_RGBA8888);
+        notes << tr("%1: the picture (%2×%3) is scaled to the texture's %4×%5.")
+                     .arg(name)
+                     .arg(img.width)
+                     .arg(img.height)
+                     .arg(t.width)
+                     .arg(t.height);
+        img.width = t.width;
+        img.height = t.height;
+        img.rgba.assign(scaled.constBits(), scaled.constBits() + scaled.sizeInBytes());
+    }
+    if (t.format == image::PixelFormat::BC1 && picture.translucent)
+        notes << tr("%1: DXT1 keeps transparency only as on/off.").arg(name);
+    return image::encodeSurfaces(img, t.format, t.mipCount);
+}
+
+} // namespace
+
+Result<DictionaryImport> planDictionaryReplace(const Session& session, const VfsNode& node, std::size_t index,
+                                               const Picture& picture)
+{
+    auto d = loadDictionary(session, node);
+    if (!d)
+        return std::unexpected(d.error());
+    if (index >= d->textures.size())
+        return fail(ErrorCode::NotFound, "no texture #{} in {}", index + 1, node.name());
+    DictionaryImport result;
+    auto surfaces = fitPicture(picture, d->textures[index], result.notes);
+    if (!surfaces)
+        return std::unexpected(surfaces.error());
+    auto data = d->format->replace(d->data, index, *surfaces);
+    if (!data)
+        return std::unexpected(data.error());
+    result.data = std::move(*data);
+    result.replaced = 1;
+    result.kept = static_cast<int>(d->textures.size()) - 1;
+    return result;
+}
+
+std::vector<std::filesystem::path> picturesIn(const std::filesystem::path& folder)
+{
+    std::vector<std::filesystem::path> pictures;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+        const std::string ext = lower(entry.path().extension().string());
+        if (entry.is_regular_file() && (ext == ".png" || ext == ".dds" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp"))
+            pictures.push_back(entry.path());
+    }
+    std::ranges::sort(pictures);
+    return pictures;
+}
+
+Result<DictionaryImport> planDictionaryImport(const Session& session, const VfsNode& node,
+                                              const std::vector<std::filesystem::path>& pictures)
+{
+    auto d = loadDictionary(session, node);
+    if (!d)
+        return std::unexpected(d.error());
+    std::map<std::string, std::size_t> byName; // lower-case texture name -> index
+    for (std::size_t i = 0; i < d->textures.size(); ++i)
+        byName.try_emplace(lower(d->textures[i].name), i);
+
+    DictionaryImport result;
+    result.data = std::move(d->data);
+    std::vector<bool> done(d->textures.size(), false);
+    for (const std::filesystem::path& path : pictures) {
+        const QString file = toQString(path.filename());
+        const auto it = byName.find(lower(toQString(path.stem()).toStdString()));
+        if (it == byName.end()) {
+            result.unmatched << file;
+            continue;
+        }
+        if (done[it->second]) {
+            result.failed << tr("%1: another picture for this texture was used").arg(file);
+            continue;
+        }
+        auto picture = loadPicture(path);
+        if (!picture) {
+            result.failed << QStringLiteral("%1: %2").arg(file, toQString(picture.error().message));
+            continue;
+        }
+        auto surfaces = fitPicture(*picture, d->textures[it->second], result.notes);
+        if (!surfaces) {
+            result.failed << QStringLiteral("%1: %2").arg(file, toQString(surfaces.error().message));
+            continue;
+        }
+        auto data = d->format->replace(result.data, it->second, *surfaces);
+        if (!data) {
+            result.failed << QStringLiteral("%1: %2").arg(file, toQString(data.error().message));
+            continue;
+        }
+        result.data = std::move(*data);
+        done[it->second] = true;
+        ++result.replaced;
+    }
+    result.kept = static_cast<int>(std::ranges::count(done, false));
+    if (result.replaced == 0 && result.failed.isEmpty())
+        return fail(ErrorCode::NotFound, "{}",
+                    tr("No picture is named after a texture of %1 (e.g. %2.png).")
+                        .arg(toQString(node.name()), toQString(d->textures.front().name))
+                        .toStdString());
+    return result;
 }
 
 } // namespace viewer::app

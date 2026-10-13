@@ -10,6 +10,8 @@ add_library(viewer_game_blur STATIC
     ChunkFile.hpp
     ModelDecoder.cpp
     ModelDecoder.hpp
+    Physics.cpp
+    Physics.hpp
     PakArchive.cpp
     PakArchive.hpp
 )

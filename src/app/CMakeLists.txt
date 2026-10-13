@@ -31,6 +31,8 @@ qt_add_executable(viewer_app WIN32
     Session.hpp
     TextEditorWindow.cpp
     TextEditorWindow.hpp
+    TextureBrowser.cpp
+    TextureBrowser.hpp
     Theme.cpp
     Theme.hpp
     VfsModel.cpp
@@ -61,6 +63,7 @@ qt_add_resources(viewer_app "app_resources"
     FILES
         "${PROJECT_SOURCE_DIR}/resources/icons/app.svg"
         "${PROJECT_SOURCE_DIR}/resources/icons/edit-mode.svg"
+        "${PROJECT_SOURCE_DIR}/resources/icons/textures.svg"
         ${_type_icons})
 
 target_compile_definitions(viewer_app PRIVATE

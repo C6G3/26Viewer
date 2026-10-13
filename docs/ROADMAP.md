@@ -65,8 +65,12 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 2. [x] `.model` geometry: vertex/index buffers, all LODs, shadow hulls (see docs/formats/blur.md); next: part names, materials, UVs
 3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL)
    - [x] Real normals and UVs; material look per effect (paint colour, glass, lights, chrome); embedded textures listed and exported
-   - [ ] Material values (which texture each material uses) → textured rendering
+   - [x] Material values (which texture each material uses) → textured rendering, cars
+     included (texture table recovered from Blur.exe)
+   - [ ] Skinned characters: decode `.skeleton` so heads/hands sit on their bones
    - [ ] Translate the game's effects (`shaders-speed.pak`) for an exact match
+   - [x] Collision: a model's `Coll` shapes drawn over it ("Collision"); `.levelphysics`
+     opens in the 3D viewer, coloured by surface material, one route layout at a time
 4. [x] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia); import WAV folders and
    replace single sounds (ADPCM encoder; every game bank rebuilds byte for byte)
 4b. [x] Bink `.bik` video playback (Qt Multimedia FFmpeg backend), audio track picker

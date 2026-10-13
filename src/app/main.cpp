@@ -3,6 +3,7 @@
 #include "MainWindow.hpp"
 #include "PreviewWindow.hpp"
 #include "TextEditorWindow.hpp"
+#include "TextureBrowser.hpp"
 #include "Theme.hpp"
 #include "preview/PreviewPane.hpp"
 
@@ -37,7 +38,8 @@ Options parseArguments(const QApplication& app)
                                     QStringLiteral("path"));
     const QCommandLineOption tab(QStringLiteral("tab"),
                                  QStringLiteral("Preview tab to show: preview, structure, hex or properties "
-                                                "(or edit: open a text file in the editor)."),
+                                                "(or edit: open a text file in the editor; textures: a model's "
+                                                "Textures window)."),
                                  QStringLiteral("name"));
     const QCommandLineOption theme(QStringLiteral("theme"),
                                    QStringLiteral("Theme for this run only: system, light or dark."),
@@ -57,7 +59,7 @@ Options parseArguments(const QApplication& app)
     o.screenshot = parser.value(screenshot);
     o.theme = parser.value(theme).toLower();
     o.editMode = parser.isSet(editMode);
-    const QStringList tabs{"preview", "structure", "hex", "properties", "edit"};
+    const QStringList tabs{"preview", "structure", "hex", "properties", "edit", "textures"};
     o.tab = tabs.indexOf(parser.value(tab).toLower());
     return o;
 }
@@ -72,7 +74,7 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
             QApplication::quit();
         });
     };
-    constexpr int kEditTab = 4;
+    constexpr int kEditTab = 4, kTexturesTab = 5;
     QObject::connect(&window, &viewer::app::MainWindow::sessionChanged, &window, [&window, o, capture] {
         auto opened = std::make_shared<bool>(false);
         QObject::connect(&window, &viewer::app::MainWindow::previewOpened, &window,
@@ -91,6 +93,14 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
                                                                        },
                                                                        Qt::SingleShotConnection);
                                                       emit pane->editRequested();
+                                                      return;
+                                                  }
+                                                  if (o.tab == kTexturesTab) { // the Textures window instead
+                                                      preview->showTextures();
+                                                      if (viewer::app::TextureBrowser* b = preview->textureBrowser()) {
+                                                          b->resize(1100, 720);
+                                                          QTimer::singleShot(1500, b, [b, capture] { capture(b); });
+                                                      }
                                                       return;
                                                   }
                                                   if (o.tab >= 0)

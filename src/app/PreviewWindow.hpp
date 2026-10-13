@@ -13,6 +13,7 @@ class QMimeData;
 namespace viewer::app {
 
 class PreviewPane;
+class TextureBrowser;
 
 /// A separate window showing one file (opened by double-clicking it in the
 /// folder list), OpenIV-style. Several can be open at once. Its toolbar is the
@@ -35,6 +36,10 @@ public:
     void setLocation(const QString& location) { m_location = location; }
     [[nodiscard]] const QString& location() const noexcept { return m_location; }
     [[nodiscard]] PreviewPane* pane() const noexcept { return m_pane; }
+    /// The open Textures window for this file, if any.
+    [[nodiscard]] TextureBrowser* textureBrowser() const;
+    /// Opens (or brings forward) the Textures window for this file.
+    void showTextures();
 
     /// Enables Replace (Edit Mode).
     void setEditMode(bool on);
@@ -57,6 +62,9 @@ signals:
     void editRequested();
     /// Sound `index` of the shown bank should be replaced by a .wav file.
     void replaceSoundRequested(int index);
+    /// From the Textures window: replace texture `index` / import a folder.
+    void replaceTextureRequested(int index, const QString& file);
+    void importTexturesRequested(const QStringList& files);
     /// The Export… / Import… buttons.
     void exportRequested();
     void importRequested();

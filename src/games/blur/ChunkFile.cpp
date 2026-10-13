@@ -26,6 +26,21 @@ void parseChildren(ByteSpan data, Chunk& chunk, int depth)
         chunk.children = std::move(kids);
 }
 
+/// Blur's tools store a file's root container size 4 bytes short, which cuts
+/// its last child off (a model's "Coll", a level's "Routes"). When the
+/// children fall short of the declared count, try again with those 4 bytes.
+void widenRoot(ByteSpan data, Chunk& root)
+{
+    if (root.kind != 'C' || root.children.size() >= root.count || data.size() - root.offset < root.size + 4)
+        return;
+    Chunk wider = root;
+    wider.size += 4;
+    wider.children.clear();
+    parseChildren(data, wider, 0);
+    if (wider.children.size() > root.children.size())
+        root = std::move(wider);
+}
+
 std::size_t parseSequence(ByteSpan data, std::size_t begin, std::size_t end, std::vector<Chunk>& out, int depth)
 {
     const ByteSpan bounded = data.first(end);
@@ -35,6 +50,8 @@ std::size_t parseSequence(ByteSpan data, std::size_t begin, std::size_t end, std
         if (!chunk)
             break;
         parseChildren(data, *chunk, depth);
+        if (depth == 0)
+            widenRoot(bounded, *chunk);
         pos += chunk->size;
         out.push_back(std::move(*chunk));
     }
@@ -115,6 +132,7 @@ Result<Chunk> parseChunkFile(ByteSpan data)
     if (!root)
         return fail(ErrorCode::InvalidFormat, "not a chunk file");
     parseChildren(data, *root, 0);
+    widenRoot(data, *root);
     return *root;
 }
 

@@ -39,6 +39,10 @@ system, image decoders, the UI — is shared by every future game module.
     *Materials* shades parts like the game's effects (car paint in a colour you pick,
     see-through glass, lights, chrome); the textures stored in the model are listed
     (double-click to view) and exported with the `.obj` (which has UVs and normals).
+    *Collision* draws the shapes the game's physics uses, see-through over the model
+    (a car's wheels, doors and bumpers; a prop's boxes and cylinders).
+  - **Level collision** (Blur `.levelphysics`): the track, walls and each route's
+    barriers in 3D, coloured by surface (tarmac, grass, sand, water, armco…).
   - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV,
     and (in Edit Mode) *Replace Sound…* with a `.wav` of your own.
   - **Videos** (Bink `.bik`): playback with an audio-track picker.

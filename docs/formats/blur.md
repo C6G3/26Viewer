@@ -152,6 +152,11 @@ a data chunk as nested when its payload parses exactly as a chunk sequence.
 Root names seen: `Texture`, `  CPModel`, `Font`, `PtlData`, `  CPLevel`,
 `  CPRender`, `  CPPhysic`.
 
+The `  CP…` roots have a 20-byte header (4 extra bytes) and store a size 4 bytes
+short, which would cut off their last child (`Coll` in models, `Routes` in level
+physics). The child count is right, so the parser widens the root by 4 bytes when
+its children fall short of it.
+
 ## `.texture` ✅
 
 Chunk file: `Texture { Header, Data }`.
@@ -289,11 +294,41 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
 - **Materials.** `RA00`, u32 count, then per material an empty `RA00` and `RA00`, u32
   length, the effect name (`veh_Paint_a_b_c.fx`, `veh_Glass_c_h.fx`…). A draw group's
   material number (in the `RA01` record before its draws) indexes this list. The letters
-  after the family name are feature switches. Later, a render list declares each
-  effect's parameters (`g_MeshTexture`, `g_DentTexture`, `g_vMtlParameters`… with a
-  type: 7 texture, 6 float4s, 9 …) and their byte offsets in a value block; **where the
-  values (which texture each material uses) are stored is still unknown** 🟡.
-- **Textures** are stored in the model (no separate files for cars). Full ones: a
+  after the family name are feature switches.
+- **Render list** (`RenderingData::RenderListNode_Common`, after the scene nodes):
+  `RA00`, u32 count, then per entry `RA00` + effect name; `RA00`, u32 n, n × (`RA00` +
+  input name, u32 type, u32 count); u32 dataSize, u32 align; `RA00`, u32 n, u16
+  offsets[n]; u32 material, u32 0. Entry 0 is `InstanceReset` (no inputs), entry 2 an
+  unnamed empty one; each material has a main entry and a lighting (`SH`) entry. Types
+  are Blur.exe's `MaterialElementType`: 0 S8, 1 U8, 2 S16, 3 U16, 4 S32, 5 U32, 6 F32,
+  7 TEXTURE_INDEX, 8 MATERIAL_INDEX, 9 DATA_INDEX, 10 TEXTURE_PTR.
+- **Material values** follow the draw records: `RA00`, u32 0, u32 count, u32 bytes
+  (= the sum of the entries' dataSize), then count × (u32 render-list entry, that
+  entry's values in declared order: 1/2/4 bytes per value by type; a DATA_INDEX is
+  `RA00` + two u32 — the animated data it reads, e.g. the vehicle's lighting or a
+  wheel's). A draw group names its value sets after its first stream record
+  (`RA00`, u32 set, u32 0): pass 1 is the material's main entry. Decoded for 1,725 of
+  1,744 models, every byte accounted for. ✅
+- **Which texture a TEXTURE_INDEX means** ✅ (from Blur.exe: `FUN_006cd820` builds the
+  table, `FUN_006ed6d0` binds `table[index]` when a material is drawn): after the
+  material values, the scene stores three (package, index) vectors in a row — each
+  `RA00`, u32 count, count × (s32 package, u32 index) — followed by another `RA00`
+  record; the third vector has one pair per texture index. Package −1 means the
+  model's keyed table (`index`-th keyed texture); any other package is a streamed
+  package, numbered in file order, each holding streamed textures in file order (in
+  practice one each). Sorting the distinct (package, index) pairs therefore lines them
+  up with the streamed textures in file order. Found and consistent in all 1,519
+  models whose values decode; 82 cars and 240 keyed-only models are not in stored
+  order (e.g. the Audi S3: index 1 = (5, 0) = its 5th streamed texture,
+  `audis3_scratch`). A file can hold several scenes, each with its own table; the one
+  after the decoded value table is used.
+- **Textures** are stored in the model — every model holds all of its own (checked
+  over all models: none uses a texture it doesn't store). Each texture's own record is
+  one texture, even when names repeat (a car may hold several `DefaultColour`s) or are
+  empty. The non-streamed ones form a keyed table after the material list (`RA00`,
+  `RA00`, u32 2, u32 count, then per texture: name, u32 hash, `RA00`, `RA00`, u32 2,
+  name, the record); streamed ones sit in groups later (`RA02`, `RA00`, u32 2, name,
+  the record). Full ones: a
   length-prefixed name, an `RA01` header of 12 words ending in a hash and the byte size,
   then the `.texture` Data layout (width, height, depth, mips, format, 0, 3) and pixels.
   Streamed ones: the name and an `RA01` header of 13 words ending in hash, 1, 28 for
@@ -301,6 +336,7 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
   the Data layout and a blob with that size's top level. The Audi S3 holds 15
   (interior/engine sheet `audis3_1`, `audis3_2`, `audis3_alpha`, scratches, tyres,
   brake discs, broken glass…).
+- `Coll` (after `Render`): the model's collision — see [Collision](#collision--physics-streams-).
 - `MtaDbg` (last chunk): the exporter's build info and error log.
 
 ### Names, hierarchy and placement (`MdlDat`)
@@ -318,6 +354,57 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
   name the part (high bits are flags). Matches 14,983 of 14,994 groups across all models.
 - `Models` (100-byte records: rotation, position, bounds, links) holds the damage-bone set.
 - Not yet: materials (`veh_Paint…fx`, textures), UVs, normals.
+
+## Collision — physics streams ✅
+
+Models keep their collision in a `Coll` chunk; levels in `.levelphysics`
+(`  CPPhysic` › `Header`, `Main` = track and walls, `Routes` › one `Route` per
+route layout — a race uses one, so their barriers overlap). Same stream in both,
+read by the game's loader (0x9520A0; shapes 0x8F7E00); every stream in the game
+(1,632) parses to its end. Reference reader: `tools/research/blur_physics.py`.
+
+```
+"Head", u32 version (10; a few props 3, 6 or 7)
+objects until u32 type == 0x0FFFFFFF:
+  u32 type, base, type fields, then f32 position[3], f32 rotation[9], f32 inertia[9]
+base: f32, f32, u32, u32 material (v>=2), u32 flags, u32, f32, u32 handle,
+      f32 centre[3], u32, u32 (v>=7)
+```
+
+| Type | Shape | Fields |
+|---|---|---|
+| 0, 11 | triangle mesh (11: a template placed by type 10) | see below |
+| 17 | triangle mesh + settings | f32, mesh, 8 words (v>=5) |
+| 2 | box | f32 half extents[3] |
+| 3 | convex hull | u32 nv, u32 nt, f32 points[nv][3], u32 corners[nt][3] (points around the centre) |
+| 4 | sphere | f32 radius (v>=4) |
+| 5 | capsule | f32 height, f32 radius, along y (v>=4) |
+| 6 | cylinder | f32 height, f32 radius, along y (v>=4) |
+| 15 | cone | f32 radius, f32 height, along y (v>=4) |
+| 7 | body | u32 count, u32 (v>=6), count × (u32 type, fields, f32, f32 rotation[9], f32 position[3], f32[9]) |
+| 10 | placed copy | u32 handle of the template (v>=4) |
+
+Shape kinds come from the game's volume formulas (π r² h, π r² h / 3…). A car part's
+body has handle `0xC00000nn`, the render tag of its element (`e_wheel_backleft`,
+`e_door_left`…); the car itself has `m_CollisionMesh`, `E_ObjectCollider` and
+`E_CarCollider` hulls. Props are mostly bodies of boxes and cylinders (a chair:
+two boxes and four legs) plus hulls for their broken pieces (`S_…`).
+
+**Triangle mesh:** u32 vertexCount, u32 n, u32 bytes (in memory), u32 nodeCount,
+f32 bounds[6], f32 vertices[vertexCount][3], u32[n]; a box tree of nodeCount
+28-byte nodes (u16 box[6], u32 triangles, u32 group offset in memory, u32 first
+vertex, u32 vertex count); then each leaf's triangles in group-offset order, in
+groups of a 15-byte header (u16 surface material at +6, u8 count at +14) and
+count × 11 bytes (u8 corners[3] relative to the leaf's first vertex, u32 edge
+flags, u32); from v7 on u32 n, n × 12 bytes.
+
+**Surface materials** (Blur.exe's table at 0x416AD0): 0 Default, 1 Tarmac,
+2 Concrete, 3 Rock, 4 Dirt, 5 Mud, 6 Grass, 7 Gravel, 8 Sand, 9 WetSand, 10 Water,
+11 Brick, 12 Vegetation, 13 Wood, 14 Metal, 15 Plastic, 16 Glass, 17 Rubber,
+18 Upholstery, 19 Cardboard, 20 Flesh, 21 TrainTracks, 22 WaterDeep,
+23 ConcreteFenceChain, 24 ConcreteFencePlastic, 25 MetalHollow, 26 MetalArmco,
+27 MetalSheet, 28 MetalFenceChain, 29 MetalFenceSolid, 30 MetalFenceSlatted,
+31 MetalSolidPost, 32 DirtLightRough, 33 DirtHeavyRough (34–36 unnamed).
 
 ## Other files
 

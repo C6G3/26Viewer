@@ -73,4 +73,10 @@ QIcon editMode()
     return icon;
 }
 
+QIcon textures()
+{
+    static const QIcon icon(QStringLiteral(":/icons/textures.svg"));
+    return icon;
+}
+
 } // namespace viewer::app::icons

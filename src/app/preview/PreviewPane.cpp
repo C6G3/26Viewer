@@ -258,6 +258,7 @@ PreviewPane::PreviewPane(QWidget* parent)
     m_text->setEditButtonVisible(true);
     connect(m_text, &TextView::editRequested, this, &PreviewPane::editRequested);
     connect(m_bankView, &SoundBankView::replaceSoundRequested, this, &PreviewPane::replaceSoundRequested);
+    connect(m_model, &ModelView::texturesRequested, this, &PreviewPane::texturesRequested);
     m_previewStack->addWidget(m_message);
     m_previewStack->addWidget(m_image);
     m_previewStack->addWidget(m_text);

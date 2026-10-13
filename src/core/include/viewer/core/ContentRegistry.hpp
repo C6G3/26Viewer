@@ -57,6 +57,33 @@ public:
     }
 };
 
+/// One texture inside a texture dictionary.
+struct DictionaryTexture {
+    std::string name;
+    image::PixelFormat format = image::PixelFormat::BC1;
+    std::uint32_t width = 0;   ///< Most detailed level.
+    std::uint32_t height = 0;
+    std::uint32_t mipCount = 1;
+};
+
+/// A file holding several textures — a "texture dictionary" (Blur keeps a
+/// model's textures inside the model). Handled like a sound bank: list them,
+/// read one's pixels, and write a copy of the file with some replaced.
+class TextureDictionaryFormat {
+public:
+    virtual ~TextureDictionaryFormat() = default;
+    [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+    [[nodiscard]] virtual bool canRead(std::string_view extension, ByteSpan data) const = 0;
+    [[nodiscard]] virtual Result<std::vector<DictionaryTexture>> list(ByteSpan data) const = 0;
+    /// Texture `index`'s stored pixels, unconverted (every mip level kept).
+    [[nodiscard]] virtual Result<image::Surfaces> surfaces(ByteSpan data, std::size_t index) const = 0;
+    /// A copy of `data` with texture `index` holding `surfaces`, which must have
+    /// the texture's own size, pixel format and mip count (everything else in
+    /// the file stays byte for byte as it was).
+    [[nodiscard]] virtual Result<ByteBuffer> replace(ByteSpan data, std::size_t index,
+                                                     const image::Surfaces& surfaces) const = 0;
+};
+
 /// Breaks a file into a tree of labelled regions (chunk formats, headers...).
 class StructureParser {
 public:
@@ -94,6 +121,7 @@ public:
     void addMeshDecoder(std::shared_ptr<const MeshDecoder> decoder);
     void addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format);
     void addDecompiler(std::shared_ptr<const TextDecompiler> decompiler);
+    void addTextureDictionary(std::shared_ptr<const TextureDictionaryFormat> format);
 
     /// Finds a format able to open `path` (extension filter, then header probe).
     [[nodiscard]] const ArchiveFormat* findArchiveFormat(const std::filesystem::path& path) const;
@@ -103,6 +131,7 @@ public:
     /// `header`: the first bytes of the file (up to 4 KiB).
     [[nodiscard]] const SoundBankFormat* findSoundBankFormat(std::string_view extension, ByteSpan header) const;
     [[nodiscard]] const TextDecompiler* findDecompiler(std::string_view extension, ByteSpan data) const;
+    [[nodiscard]] const TextureDictionaryFormat* findTextureDictionary(std::string_view extension, ByteSpan data) const;
 
     [[nodiscard]] const auto& archiveFormats() const noexcept { return m_archiveFormats; }
 
@@ -114,6 +143,7 @@ private:
     std::vector<std::shared_ptr<const MeshDecoder>> m_meshDecoders;
     std::vector<std::shared_ptr<const SoundBankFormat>> m_soundBankFormats;
     std::vector<std::shared_ptr<const TextDecompiler>> m_decompilers;
+    std::vector<std::shared_ptr<const TextureDictionaryFormat>> m_textureDictionaries;
 };
 
 /// Registers handlers shared by all games: common file types, DDS decoding.

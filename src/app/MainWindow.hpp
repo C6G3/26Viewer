@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AssetEditor.hpp"
+#include "Exporter.hpp"
 #include "Extractor.hpp"
 #include "Session.hpp"
 
@@ -155,6 +156,15 @@ private:
     void importNode(const VfsNode* node, QWidget* dialogParent = nullptr);
     /// Replaces one sound of the bank shown in `window` with a .wav file.
     void replaceSound(PreviewWindow* window, int index);
+    /// Texture `index` of the file shown in `window` from picture `file` (its
+    /// Textures window); an empty `file` asks for one.
+    void replaceTexture(PreviewWindow* window, int index, QString file);
+    /// The textures of `node` that `files` are named after; no files: the
+    /// pictures in a folder the user picks.
+    void importTextures(const VfsNode* node, QWidget* dialogParent, const QStringList& files);
+    /// Shows the outcome of a texture dictionary change and asks to write it.
+    void confirmDictionaryImport(const VfsNode* node, Result<DictionaryImport> result, const QString& source,
+                                 QWidget* parent);
     /// Turns Edit Mode on if it's off (the user confirms); false if it stays off.
     bool ensureEditMode();
 

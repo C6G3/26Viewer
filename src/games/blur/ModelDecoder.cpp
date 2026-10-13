@@ -37,10 +37,14 @@
 // (name, "RA" 01 00 header, hash, size, then the .texture Data layout and the
 // pixels) and streamed ones, one record per size (16x16, 32x32...) whose
 // pixels follow in a blob — the largest holds the most detailed level.
+//
+// Collision: the "Coll" chunk after Render (see Physics.cpp). A car part's
+// body is tied to its element by the element's render tag.
 
 #include "ModelDecoder.hpp"
 
 #include "ChunkFile.hpp"
+#include "Physics.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -91,6 +95,7 @@ struct Element {
     int parent = -1;
     float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}; ///< Row vectors: p' = p * R + position
     float position[3] = {0, 0, 0};
+    std::uint32_t tag = 0; ///< Render tag (0xC00000nn); physics bodies use it to name their element.
 
     [[nodiscard]] bool isIdentity() const noexcept
     {
@@ -147,9 +152,10 @@ std::vector<Element> readElements(ByteSpan d)
         e.name = stringAt(loadScalar<std::uint32_t>(records, at + 76));
         const auto parent = loadScalar<std::int32_t>(records, at + 84);
         e.parent = parent >= 0 && static_cast<std::size_t>(parent) < records.size() / 104 ? parent : -1;
+        e.tag = loadScalar<std::uint32_t>(records, at + 100);
         if (!std::ranges::all_of(e.rotation, [](float f) { return std::isfinite(f); })
             || !std::ranges::all_of(e.position, [](float f) { return std::isfinite(f); }))
-            e = Element{e.name, e.parent};
+            e = Element{e.name, e.parent, {1, 0, 0, 0, 1, 0, 0, 0, 1}, {0, 0, 0}, e.tag};
         elements.push_back(std::move(e));
     }
     return elements;
@@ -163,6 +169,7 @@ struct Group {
     std::optional<Stream> stream;
     int element = -1;            ///< MdlDat element it belongs to (its name and placement).
     std::uint32_t material = 0;  ///< Material slot.
+    int values = -1;             ///< Its material's values (index into the value table), or -1.
     std::uint32_t highestIndex = 0;
     std::uint64_t vertexRange = 0; ///< max(minIndex + vertexCount)
 };
@@ -342,11 +349,286 @@ std::vector<std::string> readShaderNames(const Scanner& s, ByteSpan d, std::size
     return {};
 }
 
-/// Every texture stored in the file, the largest size of each.
-std::vector<Mesh::Texture> readTextures(const Scanner& s, ByteSpan d, std::size_t arch)
+// ---- Material values -----------------------------------------------------------------------
+//
+// The render list ("RenderingData::RenderListNode_Common") declares, per pass of
+// each material, the effect and its inputs: "RA" 00 00, u32 count, then per
+// entry "RA" 00 00 + effect name; "RA" 00 00, u32 n, n x ("RA" 00 00 + name,
+// u32 type, u32 count); u32 dataSize, u32 align; "RA" 00 00, u32 n, u16
+// offsets[n]; u32 material, u32 0. Types are the game's MaterialElementType:
+// 0 S8, 1 U8, 2 S16, 3 U16, 4 S32, 5 U32, 6 F32, 7 TEXTURE_INDEX, 8
+// MATERIAL_INDEX, 9 DATA_INDEX (animated data: "RA" 00 00 + two u32), 10
+// TEXTURE_PTR. Texture indices number the textures stored in the file in order.
+//
+// The values follow the draw records: "RA" 00 00, u32 0, u32 count, u32 bytes,
+// then count x (u32 render-list entry, that entry's values in declared order).
+// A draw group names its material's value set right after its first stream.
+
+struct MaterialInput {
+    std::string name;
+    std::uint32_t type = 0;
+    std::uint32_t count = 0;
+};
+
+struct RenderListEntry {
+    std::string effect;
+    std::vector<MaterialInput> inputs;
+    std::uint32_t dataSize = 0;
+};
+
+struct MaterialValues {
+    std::vector<Mesh::TextureSlot> textures;
+    std::vector<Mesh::Constant> constants;
+};
+
+/// Where a TEXTURE_INDEX points (Blur.exe builds this table in FUN_006cd820):
+/// package -1 is the model's keyed table (`texture`-th entry); any other is a
+/// streamed package, numbered in file order.
+struct TextureSource {
+    std::int32_t package = -1;
+    std::uint32_t texture = 0;
+};
+
+struct Materials {
+    std::vector<MaterialValues> sets;
+    std::vector<TextureSource> textures; ///< Per texture index; empty when not found.
+};
+
+constexpr std::uint32_t kTextureIndex = 7, kDataIndex = 9, kF32 = 6;
+
+/// A length-prefixed string at `p` (up to 64 printable characters).
+std::optional<std::string> stringAt(const Scanner& s, ByteSpan d, std::size_t p)
+{
+    if (p + 4 > d.size())
+        return std::nullopt;
+    const std::uint32_t n = s.u32(p);
+    if (n > 64 || p + 4 + n > d.size())
+        return std::nullopt;
+    std::string out(reinterpret_cast<const char*>(d.data() + p + 4), n);
+    if (!std::ranges::all_of(out, [](char c) { return c >= 32 && c < 127; }))
+        return std::nullopt;
+    return out;
+}
+
+/// The render list; `end` is set to where it stops.
+std::vector<RenderListEntry> readRenderList(const Scanner& s, ByteSpan d, std::size_t arch, std::size_t& end)
+{
+    const std::size_t cls = find(d, "RenderingData::RenderListNode_Common", arch);
+    if (cls == d.size())
+        return {};
+    // The header: "RA" 00 00, u32 count, then the first entry's name record.
+    std::size_t p = cls;
+    for (; p + 16 <= d.size() && p < cls + 0x400; ++p)
+        if (s.isRA(p, 0) && s.isRA(p + 8, 0) && s.u32(p + 4) >= 1 && s.u32(p + 4) <= 4096)
+            if (const auto name = stringAt(s, d, p + 12); name && name->size() >= 3)
+                break;
+    if (p + 16 > d.size() || p >= cls + 0x400)
+        return {};
+    const std::uint32_t count = s.u32(p + 4);
+    p += 8;
+    std::vector<RenderListEntry> entries;
+    for (std::uint32_t e = 0; e < count; ++e) {
+        RenderListEntry entry;
+        const auto effect = s.isRA(p, 0) ? stringAt(s, d, p + 4) : std::nullopt;
+        if (!effect)
+            return {};
+        entry.effect = *effect;
+        p += 8 + effect->size();
+        if (!s.isRA(p, 0) || p + 8 > d.size())
+            return {};
+        const std::uint32_t n = s.u32(p + 4);
+        p += 8;
+        if (n > 64)
+            return {};
+        for (std::uint32_t i = 0; i < n; ++i) {
+            const auto name = s.isRA(p, 0) ? stringAt(s, d, p + 4) : std::nullopt;
+            if (!name || p + 16 + name->size() > d.size())
+                return {};
+            p += 8 + name->size();
+            entry.inputs.push_back({*name, s.u32(p), s.u32(p + 4)});
+            if (entry.inputs.back().type > 10 || entry.inputs.back().count > 256)
+                return {};
+            p += 8;
+        }
+        if (p + 16 > d.size())
+            return {};
+        entry.dataSize = s.u32(p);
+        p += 8; // dataSize, align
+        if (!s.isRA(p, 0))
+            return {};
+        const std::uint32_t offsets = s.u32(p + 4);
+        if (offsets != n)
+            return {};
+        p += 8 + 2 * std::size_t{offsets} + 8; // offsets, material, 0
+        entries.push_back(std::move(entry));
+    }
+    end = p;
+    return entries;
+}
+
+/// Reads count value sets at `p`; empty when they don't parse or their sizes
+/// don't add up to `bytes`.
+std::vector<MaterialValues> readValueSets(const Scanner& s, ByteSpan d, const std::vector<RenderListEntry>& entries,
+                                          std::size_t p, std::uint32_t count, std::uint32_t bytes, std::size_t& end)
+{
+    std::vector<MaterialValues> sets;
+    std::uint64_t total = 0;
+    for (std::uint32_t k = 0; k < count; ++k) {
+        if (p + 4 > d.size() || s.u32(p) >= entries.size())
+            return {};
+        const RenderListEntry& entry = entries[s.u32(p)];
+        total += entry.dataSize;
+        p += 4;
+        MaterialValues values;
+        for (const MaterialInput& input : entry.inputs) {
+            Mesh::Constant constant{input.name, {}};
+            for (std::uint32_t i = 0; i < input.count; ++i) {
+                if (input.type == kDataIndex) {
+                    if (!s.isRA(p, 0) || p + 12 > d.size())
+                        return {};
+                    p += 12;
+                    continue;
+                }
+                const std::size_t size = input.type <= 1 ? 1 : input.type <= 3 ? 2 : 4;
+                if (p + size > d.size())
+                    return {};
+                if (input.type == kTextureIndex)
+                    values.textures.push_back({input.name, static_cast<int>(s.u32(p))});
+                else if (input.type == kF32)
+                    constant.values.push_back(loadScalar<float>(d, p));
+                p += size;
+            }
+            if (!constant.values.empty())
+                values.constants.push_back(std::move(constant));
+        }
+        sets.push_back(std::move(values));
+    }
+    if (total != bytes)
+        return {};
+    end = p;
+    return sets;
+}
+
+/// A vector of (package, index) pairs at `p` ("RA" 00 00, u32 count, pairs);
+/// `next` is set to where it ends.
+std::optional<std::vector<TextureSource>> sourcePairs(const Scanner& s, ByteSpan d, std::size_t p, std::size_t& next)
+{
+    if (p + 8 > d.size() || !s.isRA(p, 0))
+        return std::nullopt;
+    const std::uint32_t count = s.u32(p + 4);
+    if (count > 4096 || p + 8 + 8 * std::size_t{count} > d.size())
+        return std::nullopt;
+    std::vector<TextureSource> pairs;
+    for (std::uint32_t k = 0; k < count; ++k) {
+        const auto package = static_cast<std::int32_t>(s.u32(p + 8 + 8 * k));
+        const std::uint32_t index = s.u32(p + 12 + 8 * k);
+        if (package < -1 || package >= 4096 || (index >= 65536 && index != 0xFFFFFFFF))
+            return std::nullopt;
+        pairs.push_back({package, index});
+    }
+    next = p + 8 + 8 * std::size_t{count};
+    return pairs;
+}
+
+/// The texture table: the scene's three (package, index) vectors follow its
+/// material values (Blur.exe's reader FUN_006ea950), the third one being the
+/// textures, then another "RA" record.
+std::vector<TextureSource> readTextureSources(const Scanner& s, ByteSpan d, std::size_t from)
+{
+    static constexpr char kRA[] = {'R', 'A', 0, 0};
+    const std::string_view hay(reinterpret_cast<const char*>(d.data()), d.size());
+    for (std::size_t p = hay.find({kRA, 4}, from); p != std::string_view::npos; p = hay.find({kRA, 4}, p + 1)) {
+        std::size_t second = 0, third = 0, after = 0;
+        if (!sourcePairs(s, d, p, second) || !sourcePairs(s, d, second, third))
+            continue;
+        auto textures = sourcePairs(s, d, third, after);
+        if (textures && !textures->empty() && after + 4 <= d.size() && s.isRA(after, 0))
+            return std::move(*textures);
+    }
+    return {};
+}
+
+/// The material value table (see above), found after the render list, and the
+/// texture table after it.
+Materials readMaterials(const Scanner& s, ByteSpan d, std::size_t arch)
+{
+    std::size_t end = 0;
+    const std::vector<RenderListEntry> entries = readRenderList(s, d, arch, end);
+    if (entries.empty())
+        return {};
+    static constexpr char kHeader[] = {'R', 'A', 0, 0, 0, 0, 0, 0};
+    const std::string_view hay(reinterpret_cast<const char*>(d.data()), d.size());
+    for (std::size_t p = hay.find({kHeader, 8}, end); p != std::string_view::npos && p + 16 <= d.size();
+         p = hay.find({kHeader, 8}, p + 1)) {
+        const std::uint32_t count = s.u32(p + 8), bytes = s.u32(p + 12);
+        if (count == 0 || count > 65536 || bytes > d.size())
+            continue;
+        // A cheap check before parsing: the first set names a render-list entry.
+        if (s.u32(p + 16) >= entries.size())
+            continue;
+        std::size_t after = 0;
+        if (auto sets = readValueSets(s, d, entries, p + 16, count, bytes, after); sets.size() == count)
+            return {std::move(sets), readTextureSources(s, d, after)};
+    }
+    return {};
+}
+
+/// Which stored texture (file order) each texture index means, from the
+/// texture table: keyed entries count the keyed textures, streamed packages
+/// hold the streamed ones in file order. Empty when the table doesn't fit.
+std::vector<int> textureOrder(const std::vector<TextureSource>& sources, const std::vector<bool>& streamed)
+{
+    std::vector<int> keyed, inPackages;
+    for (std::size_t t = 0; t < streamed.size(); ++t)
+        (streamed[t] ? inPackages : keyed).push_back(static_cast<int>(t));
+    std::vector<std::pair<std::int32_t, std::uint32_t>> packaged;
+    for (const TextureSource& src : sources)
+        if (src.package >= 0)
+            packaged.emplace_back(src.package, src.texture);
+    std::ranges::sort(packaged);
+    packaged.erase(std::ranges::unique(packaged).begin(), packaged.end());
+    if (packaged.size() != inPackages.size())
+        return {};
+    std::vector<int> order;
+    for (const TextureSource& src : sources) {
+        if (src.package < 0) {
+            if (src.texture >= keyed.size())
+                return {};
+            order.push_back(keyed[src.texture]);
+        } else {
+            const auto at = std::ranges::lower_bound(packaged, std::pair{src.package, src.texture});
+            order.push_back(inPackages[static_cast<std::size_t>(at - packaged.begin())]);
+        }
+    }
+    return order;
+}
+
+/// Consecutive mip levels of a texture stored together, from width x height down.
+struct PixelRun {
+    std::size_t offset = 0;
+    std::size_t size = 0;
+    std::uint32_t width = 0, height = 0;
+};
+
+/// A texture stored in the model: its pixels as one run (full textures) or
+/// one run per stored size (streamed ones: each larger size holds just its
+/// top level, the smallest the rest of the chain) — largest first, together
+/// the whole mip chain.
+struct StoredTexture {
+    std::string name;
+    image::PixelFormat format{};
+    std::vector<PixelRun> runs;
+    std::uint32_t mipCount = 0;
+    bool streamed = false; ///< In a streamed group ("RA" 02 before its name), not the keyed table.
+};
+
+/// Every texture stored in the file.
+std::vector<StoredTexture> findTextures(const Scanner& s, ByteSpan d, std::size_t arch)
 {
     struct Candidate {
         std::string name;
+        bool first = false; ///< A texture's own record ("RA" 01 header), not a larger streamed size.
+        bool streamed = false;
         std::uint32_t width = 0, height = 0;
         image::PixelFormat format{};
         std::size_t pixels = 0, size = 0;
@@ -381,40 +663,130 @@ std::vector<Mesh::Texture> readTextures(const Scanner& s, ByteSpan d, std::size_
         }
         if (c.pixels + c.size > d.size() || c.size < image::surfaceSize(c.format, w, h))
             continue;
-        for (std::uint32_t len = 1; ra && len <= 64 && len + 4 <= ra; ++len) {
+        c.first = ra != 0;
+        // The name in front of the header (length-prefixed; it may be empty or
+        // contain spaces: "_ac schnitzer_acs1_coupe").
+        for (std::uint32_t len = 0; ra && len <= 64 && len + 4 <= ra; ++len) {
             if (s.u32(ra - len - 4) != len)
                 continue;
             std::string name(reinterpret_cast<const char*>(d.data() + ra - len), len);
-            if (std::ranges::all_of(name, [](char ch) { return ch > 32 && ch < 127; }))
+            if (std::ranges::all_of(name, [](char ch) { return ch >= 32 && ch < 127; }))
                 c.name = std::move(name);
+            // keyed table: "RA" 00 00, "RA" 00 00, u32 2, name; streamed group: "RA" 02 00, "RA" 00 00, u32 2, name
+            c.streamed = ra >= len + 16 && s.isRA(ra - len - 16, 2);
             break;
         }
-        // A streamed texture names only its first (smallest) record; the next
-        // sizes up follow it unnamed.
-        if (c.name.empty() && !found.empty() && found.back().format == c.format
-            && (c.width == 2 * found.back().width || c.height == 2 * found.back().height))
-            c.name = found.back().name;
-        if (c.name.empty())
-            c.name = std::format("texture {}", found.size() + 1);
         found.push_back(std::move(c));
     }
-    std::vector<Mesh::Texture> textures;
-    std::map<std::string, std::size_t> best; // name -> index in found of the largest
-    std::vector<std::string> order;
-    for (std::size_t i = 0; i < found.size(); ++i) {
-        auto [it, added] = best.try_emplace(found[i].name, i);
-        if (added)
-            order.push_back(found[i].name);
-        else if (std::uint64_t{found[i].width} * found[i].height
-                 > std::uint64_t{found[it->second].width} * found[it->second].height)
-            it->second = i;
+    // One texture per own record, in file order: the materials number them so
+    // (two textures may share a name, e.g. several "DefaultColour"). A streamed
+    // texture's larger sizes follow its record unnamed; each joins the texture
+    // before it when it is the next size up. Then the sizes are chained: each
+    // run must start at the level where the one before ended.
+    std::vector<StoredTexture> textures;
+    for (const Candidate& c : found) {
+        const PixelRun run{c.pixels, c.size, c.width, c.height};
+        if (c.first) {
+            textures.push_back({c.name.empty() ? std::format("texture {}", textures.size() + 1) : c.name, c.format,
+                                {run}, 0, c.streamed});
+            continue;
+        }
+        if (textures.empty() || textures.back().format != c.format)
+            continue;
+        StoredTexture& t = textures.back();
+        const auto same = std::ranges::find_if(t.runs, [&](const PixelRun& r) { return r.width == c.width && r.height == c.height; });
+        if (same != t.runs.end()) {
+            if (c.size > same->size)
+                *same = run;
+        } else if (const PixelRun& last = t.runs.back(); c.width == 2 * last.width || c.height == 2 * last.height) {
+            t.runs.push_back(run);
+        }
     }
-    for (const std::string& name : order) {
-        const Candidate& c = found[best[name]];
-        if (auto img = image::decodeSurface(d.subspan(c.pixels, c.size), c.format, c.width, c.height))
-            textures.push_back({name, std::move(*img)});
+    for (StoredTexture& t : textures) {
+        std::ranges::sort(t.runs, std::greater{}, [](const PixelRun& r) { return std::uint64_t{r.width} * r.height; });
+        std::uint32_t w = t.runs.front().width, h = t.runs.front().height;
+        std::size_t kept = 0;
+        bool complete = false; // reached the 1x1 level
+        for (PixelRun& run : t.runs) {
+            if (complete || run.width != w || run.height != h)
+                break; // a gap in the chain: the rest can't be placed
+            std::size_t used = 0;
+            while (!complete && run.size - used >= image::surfaceSize(t.format, w, h)) {
+                used += image::surfaceSize(t.format, w, h);
+                ++t.mipCount;
+                complete = w == 1 && h == 1;
+                w = std::max(1u, w / 2);
+                h = std::max(1u, h / 2);
+            }
+            run.size = used; // padding after the levels isn't part of the texture
+            ++kept;
+        }
+        t.runs.resize(kept);
     }
+    std::erase_if(textures, [](const StoredTexture& t) { return t.runs.empty() || t.mipCount == 0; });
     return textures;
+}
+
+/// The textures decoded for display (most detailed level of each).
+std::vector<Mesh::Texture> readTextures(const Scanner& s, ByteSpan d, std::size_t arch)
+{
+    std::vector<Mesh::Texture> out;
+    for (const StoredTexture& t : findTextures(s, d, arch)) {
+        const PixelRun& top = t.runs.front();
+        auto img = image::decodeSurface(d.subspan(top.offset, image::surfaceSize(t.format, top.width, top.height)),
+                                        t.format, top.width, top.height);
+        if (!img) { // kept (empty) so the materials' texture numbers still line up
+            out.push_back({t.name, {}});
+            continue;
+        }
+        img->mipCount = t.mipCount;
+        out.push_back({t.name, std::move(*img)});
+    }
+    return out;
+}
+
+/// The stored textures of a whole model file.
+std::vector<StoredTexture> modelTextures(ByteSpan d)
+{
+    const std::size_t arch = find(d, "ARCH");
+    if (arch == d.size())
+        return {};
+    return findTextures(Scanner(d, arch), d, arch);
+}
+
+/// The model's collision shapes (its "Coll" chunk) as collision parts, named
+/// after the element each body moves with. Returns how many were added.
+std::size_t addCollision(ByteSpan d, const std::vector<Element>& elements, Mesh& mesh)
+{
+    auto root = parseChunkFile(d);
+    const Chunk* coll = root ? root->child("Coll") : nullptr;
+    if (!coll)
+        return 0;
+    auto set = readPhysicsStream(d.subspan(coll->payloadOffset(), coll->payloadSize()));
+    if (!set) {
+        mesh.notes.push_back(std::format("Collision not read: {}", set.error().message));
+        return 0;
+    }
+    std::map<std::uint32_t, int> byTag;
+    for (std::size_t i = 0; i < elements.size(); ++i)
+        byTag.try_emplace(elements[i].tag, static_cast<int>(i));
+    const auto element = [&](const CollisionShape& shape) {
+        const auto it = byTag.find(shape.owner);
+        return it == byTag.end() ? -1 : it->second;
+    };
+    const std::size_t before = mesh.parts.size();
+    appendCollisionParts(
+        mesh, set->shapes, "Collision",
+        [&](const CollisionShape& shape) {
+            const int e = element(shape);
+            return e >= 0 && !elements[static_cast<std::size_t>(e)].name.empty()
+                       ? elements[static_cast<std::size_t>(e)].name
+                       : std::format("Body {}", shape.object + 1);
+        },
+        element);
+    for (std::size_t p = before; p < mesh.parts.size(); ++p)
+        mesh.parts[p].color = 0xE8A33A; // one colour for a model's collision: it's drawn over the model
+    return mesh.parts.size() - before;
 }
 
 void placePart(Mesh& mesh, Mesh::Part& part, const Element& e)
@@ -446,6 +818,62 @@ void placePart(Mesh& mesh, Mesh::Part& part, const Element& e)
 }
 
 } // namespace
+
+// ---- Textures stored in models ------------------------------------------------------------
+
+bool ModelTextureDictionary::canRead(std::string_view extension, ByteSpan) const
+{
+    return extension == "model" || extension == "particlemesh";
+}
+
+Result<std::vector<DictionaryTexture>> ModelTextureDictionary::list(ByteSpan data) const
+{
+    std::vector<DictionaryTexture> out;
+    for (const StoredTexture& t : modelTextures(data))
+        out.push_back({t.name, t.format, t.runs.front().width, t.runs.front().height, t.mipCount});
+    return out;
+}
+
+Result<image::Surfaces> ModelTextureDictionary::surfaces(ByteSpan data, std::size_t index) const
+{
+    const auto textures = modelTextures(data);
+    if (index >= textures.size())
+        return fail(ErrorCode::NotFound, "no texture #{} in this model ({} textures)", index + 1, textures.size());
+    const StoredTexture& t = textures[index];
+    image::Surfaces s{t.format, t.runs.front().width, t.runs.front().height, t.mipCount, 1, {}};
+    for (const PixelRun& run : t.runs)
+        s.data.insert(s.data.end(), data.begin() + static_cast<std::ptrdiff_t>(run.offset),
+                      data.begin() + static_cast<std::ptrdiff_t>(run.offset + run.size));
+    return s;
+}
+
+Result<ByteBuffer> ModelTextureDictionary::replace(ByteSpan data, std::size_t index, const image::Surfaces& surfaces) const
+{
+    const auto textures = modelTextures(data);
+    if (index >= textures.size())
+        return fail(ErrorCode::NotFound, "no texture #{} in this model ({} textures)", index + 1, textures.size());
+    const StoredTexture& t = textures[index];
+    const std::uint32_t w = t.runs.front().width, h = t.runs.front().height;
+    if (surfaces.format != t.format || surfaces.width != w || surfaces.height != h || surfaces.mipCount != t.mipCount
+        || surfaces.layers != 1)
+        return fail(ErrorCode::Unsupported, "{} must stay {}x{} {} with {} mip level(s)", t.name, w, h,
+                    image::pixelFormatName(t.format), t.mipCount);
+    std::size_t total = 0;
+    for (const PixelRun& run : t.runs)
+        total += run.size;
+    if (surfaces.data.size() < total)
+        return fail(ErrorCode::Unsupported, "{} needs {} bytes of pixels, got {}", t.name, total, surfaces.data.size());
+    // Same size, format and levels: the pixels are overwritten where they are,
+    // so the rest of the file doesn't move.
+    ByteBuffer out(data.begin(), data.end());
+    std::size_t from = 0;
+    for (const PixelRun& run : t.runs) {
+        std::copy_n(surfaces.data.begin() + static_cast<std::ptrdiff_t>(from), run.size,
+                    out.begin() + static_cast<std::ptrdiff_t>(run.offset));
+        from += run.size;
+    }
+    return out;
+}
 
 bool ModelDecoder::canDecode(std::string_view extension, ByteSpan) const
 {
@@ -529,8 +957,12 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
                 ++g.slots;
             }
             if (end + 28 <= d.size() && s.isRA(end, 0) && s.isRA(end + 8, 0) && s.u32(end + 4) >= 1
-                && s.u32(end + 4) <= 4)
+                && s.u32(end + 4) <= 4) {
                 g.stream = Stream{s.u32(end + 12), s.u32(end + 20)};
+                // The first pass's material values: "RA" 00 00, u32 value set, u32 0.
+                if (end + 40 <= d.size() && s.isRA(end + 28, 0) && s.u32(end + 36) == 0)
+                    g.values = static_cast<int>(s.u32(end + 32));
+            }
             // Before the group: "RA" 01 00, u32 material, u32 ?, u32 ?, u32 ?, u32 element
             // (low 16 bits; the high bits are flags).
             if (const std::size_t first = g.lods.front().at; first >= 0x54 && s.isRA(first - 0x54, 1)) {
@@ -556,6 +988,8 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
     std::map<std::size_t, std::uint32_t> baseVertex; // vb index -> first vertex in mesh.positions
     bool hasNormals = false, hasUvs = false; // normals/uvs stay the same length as positions until the end
     const std::vector<std::string> shaders = readShaderNames(s, d, arch);
+    const Materials materials = readMaterials(s, d, arch);
+    const std::vector<MaterialValues>& materialValues = materials.sets;
     const auto addVertexBuffer = [&](std::size_t vbIndex) -> std::optional<std::uint32_t> {
         if (const auto it = baseVertex.find(vbIndex); it != baseVertex.end())
             return it->second;
@@ -683,6 +1117,10 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
         part.material = std::format("Material {}", group.material);
         if (group.material < shaders.size())
             part.shader = shaders[group.material];
+        if (group.values >= 0 && static_cast<std::size_t>(group.values) < materialValues.size()) {
+            part.textures = materialValues[static_cast<std::size_t>(group.values)].textures;
+            part.constants = materialValues[static_cast<std::size_t>(group.values)].constants;
+        }
         if (named && !elements[static_cast<std::size_t>(group.element)].isIdentity())
             placePart(mesh, part, elements[static_cast<std::size_t>(group.element)]);
         mesh.parts.push_back(std::move(part));
@@ -694,12 +1132,41 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
     if (!hasUvs)
         mesh.uvs.clear();
     mesh.textures = readTextures(s, d, arch);
+    // Texture indices go through the texture table to the stored textures (one
+    // that didn't decode is kept empty, so positions line up). Without a table
+    // the stored order is used, unless some textures are streamed.
+    std::vector<bool> streamed;
+    for (const StoredTexture& t : findTextures(s, d, arch))
+        streamed.push_back(t.streamed);
+    const std::vector<int> order = textureOrder(materials.textures, streamed);
+    const bool unmapped = order.empty() && std::ranges::find(streamed, true) != streamed.end();
+    for (Mesh::Part& part : mesh.parts)
+        for (Mesh::TextureSlot& slot : part.textures) {
+            if (!order.empty())
+                slot.texture = slot.texture >= 0 && static_cast<std::size_t>(slot.texture) < order.size()
+                                   ? order[static_cast<std::size_t>(slot.texture)]
+                                   : -1;
+            else if (unmapped)
+                slot.texture = -1;
+            // a slot past the end is a texture this file doesn't hold
+            if (slot.texture < 0 || static_cast<std::size_t>(slot.texture) >= mesh.textures.size())
+                slot.texture = -1;
+        }
+    const auto textured = std::ranges::count_if(mesh.parts, [](const Mesh::Part& p) { return !p.textures.empty(); });
+    if (!materialValues.empty())
+        mesh.notes.push_back(std::format("{} material value set(s); {} part(s) with textures", materialValues.size(),
+                                         textured));
+    if (unmapped && textured)
+        mesh.notes.push_back("This model's texture table wasn't found, so its streamed textures aren't shown");
+    const std::size_t collisionParts = addCollision(d, elements, mesh);
     mesh.notes.push_back(std::format("{} vertex buffer(s), {} index buffer(s), {} part(s), {} detail level(s)",
                                      vbs.size(), ibs.size(), mesh.parts.size(), mesh.lodCount()));
     if (shadows)
         mesh.notes.push_back(std::format("{} shadow-hull part(s) (hidden until ticked in the parts list)", shadows));
     if (skipped)
         mesh.notes.push_back(std::format("{} part(s) not understood yet", skipped));
+    if (collisionParts)
+        mesh.notes.push_back(std::format("{} collision shape(s) (shown with \"Collision\")", collisionParts));
     if (!mesh.textures.empty()) {
         std::string list;
         for (const Mesh::Texture& t : mesh.textures)

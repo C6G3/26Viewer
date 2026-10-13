@@ -29,7 +29,8 @@ namespace viewer::app {
 /// you look at is readable; colours follow the palette (dark mode).
 ///
 /// Draws one detail level (LOD) of the parts that are switched on, with
-/// optional wireframe, a ground grid and a soft shadow on the ground.
+/// optional wireframe, a ground grid and a soft shadow on the ground. A
+/// model's collision shapes are drawn see-through over it, outlined.
 class ModelCanvas : public QOpenGLWidget, protected QOpenGLFunctions {
     Q_OBJECT
 public:
@@ -67,6 +68,9 @@ private:
     };
 
     void upload();
+    /// The model's textures on the GPU (one per Mesh texture; 0 when it has no pixels).
+    void uploadTextures();
+    void releaseTextures();
     void buildGrid(const QVector3D& lo, const QVector3D& hi);
     [[nodiscard]] QMatrix4x4 viewMatrix() const;
     [[nodiscard]] bool partVisible(std::size_t part) const;
@@ -77,6 +81,10 @@ private:
     int m_lod = 0;
     std::vector<bool> m_visible;
     std::vector<bool> m_highlighted;
+    std::vector<bool> m_helper; ///< Per part: Mesh::isHelper (worked out once per mesh).
+    std::vector<int> m_partTexture; ///< Per part: the texture it's coloured with (Mesh::textures), or -1.
+    std::vector<GLuint> m_glTextures;
+    std::vector<bool> m_textureAlpha; ///< Per texture: has see-through pixels.
     bool m_solid = true;
     bool m_wireframe = false;
     bool m_grid = true;
@@ -117,6 +125,10 @@ public:
     void setMesh(std::shared_ptr<const Mesh> mesh);
     void clear();
 
+signals:
+    /// "Textures": open the window listing the textures stored in the model.
+    void texturesRequested();
+
 private:
     void buildTree();
     void updateCounts();
@@ -124,9 +136,9 @@ private:
     void collectParts(QTreeWidgetItem* item, std::vector<int>& out) const;
     void applyVisibility();
     void showPartsMenu(const QPoint& pos);
-    void setAllParts(bool on, bool includeShadows);
-    /// Opens a texture stored in the model in its own window.
-    void showTexture(int index);
+    void setAllParts(bool on, bool includeHelpers);
+    /// Ticks or unticks every collision shape of the model (the "Collision" box).
+    void setCollisionShown(bool on);
     void updatePaintButton();
 
     std::shared_ptr<const Mesh> m_mesh;
@@ -138,8 +150,10 @@ private:
     QCheckBox* m_wireframe;
     QCheckBox* m_grid;
     QCheckBox* m_shadow;
+    QCheckBox* m_collision;
     QCheckBox* m_materials;
     QToolButton* m_paint;
+    QToolButton* m_textures;
     QComboBox* m_lod;
     std::vector<QTreeWidgetItem*> m_partItems; ///< Per Mesh part.
     bool m_updatingTree = false;
