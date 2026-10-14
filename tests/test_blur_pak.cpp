@@ -7,11 +7,16 @@
 
 #include "PakArchive.hpp"
 #include "viewer/core/Compression.hpp"
+#include "viewer/core/ContentRegistry.hpp"
+#include "viewer/core/RandomAccessFile.hpp"
+#include "viewer/core/Vfs.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 
 using namespace viewer;
@@ -236,6 +241,61 @@ TEST_CASE("Replacing entries keeps names, encodings and the other files intact")
             CHECK((*pak)->describeEntry(2)[0].value.starts_with("Chunked"));
         }
     }
+}
+
+TEST_CASE("One file of a changed archive is restored from the archive's backup")
+{
+    namespace fs = std::filesystem;
+    const fs::path game = fs::temp_directory_path() / "26viewer_test_restore_one";
+    std::error_code ec;
+    fs::remove_all(game, ec);
+    const fs::path archive = game / "cache" / "data.pak";
+    auto files = sampleFiles();
+    REQUIRE(writeFile(archive, buildPak(files, 2, 40)));
+
+    ContentRegistry content;
+    content.addArchiveFormat(std::make_shared<viewer::games::blur::PakFormat>());
+    // The archive's files in the order of `files` (the tree sorts them by name).
+    const auto mounted = [&](Vfs& vfs) -> std::vector<const VfsNode*> {
+        vfs.mountDirectory(game, content);
+        const auto all = Vfs::collectFiles(vfs.root());
+        std::vector<const VfsNode*> out;
+        for (const FileSpec& f : files)
+            if (const auto it = std::ranges::find_if(all, [&](const VfsNode* n) { return n->name() == f.name; });
+                it != all.end())
+                out.push_back(*it);
+        CHECK(all.size() == files.size()); // the backup folder isn't mounted
+        return out;
+    };
+
+    // Back up into "<game>/backup/cache/data.pak", then change two files.
+    {
+        Vfs vfs;
+        const auto nodes = mounted(vfs);
+        REQUIRE(nodes.size() == files.size());
+        REQUIRE(ensureBackup(archive, vfs.backupRoot()) == game / "backup" / "cache" / "data.pak");
+        REQUIRE(vfs.replace(*nodes[0], test::sampleData(300, 5)));
+    }
+    {
+        Vfs vfs;
+        const auto nodes = mounted(vfs);
+        REQUIRE(nodes.size() == files.size());
+        REQUIRE(vfs.replace(*nodes[1], test::sampleData(900, 6)));
+    }
+    // Put back only the second one, as it is in the backup.
+    {
+        Vfs vfs;
+        const auto nodes = mounted(vfs);
+        auto original = vfs.readBackup(*nodes[1], content);
+        REQUIRE(original);
+        CHECK(*original == files[1].data);
+        REQUIRE(vfs.replace(*nodes[1], *original));
+    }
+    Vfs vfs;
+    const auto nodes = mounted(vfs);
+    CHECK(vfs.read(*nodes[1]).value() == files[1].data);  // restored
+    CHECK(vfs.read(*nodes[0]).value() == test::sampleData(300, 5)); // keeps its change
+    fs::remove_all(game, ec);
 }
 
 TEST_CASE("Blur name and content hashes")

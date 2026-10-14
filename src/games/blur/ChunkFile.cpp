@@ -102,13 +102,20 @@ std::optional<Chunk> readChunkHeader(ByteSpan data, std::size_t offset)
         if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) > 0x7E)
             return std::nullopt;
 
-    const std::size_t padded = (name.size() + 1 + 3) & ~std::size_t{3};
-    const std::size_t headerSize = padded + 8;
-    if (data.size() - offset < headerSize)
+    // The name is NUL-padded to a multiple of 4 — or, in level render files,
+    // sits in a fixed 8-byte field whose tail keeps old bytes ("LS\0ID\0\0\0":
+    // "LS" written over "NO_ID").
+    std::size_t padded = (name.size() + 1 + 3) & ~std::size_t{3};
+    if (data.size() - offset < padded + 8)
         return std::nullopt;
     for (std::size_t i = offset + name.size(); i < offset + padded; ++i)
-        if (data[i] != std::byte{0})
-            return std::nullopt;
+        if (data[i] != std::byte{0}) {
+            if (name.size() >= 8 || data.size() - offset < 16)
+                return std::nullopt;
+            padded = 8;
+            break;
+        }
+    const std::size_t headerSize = padded + 8;
 
     const auto size = loadScalar<std::uint32_t>(data, offset + padded);
     const auto count = loadScalar<std::uint16_t>(data, offset + padded + 4);

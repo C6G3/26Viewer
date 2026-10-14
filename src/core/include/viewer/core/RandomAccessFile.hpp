@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string_view>
 
 namespace viewer {
 
@@ -67,15 +68,28 @@ private:
     Result<void> m_status;
 };
 
-/// Where the untouched original of `file` is kept: "<file>.bak" beside it.
-[[nodiscard]] std::filesystem::path backupPathFor(const std::filesystem::path& file);
+/// The folder originals are kept in, inside the game folder ("backup").
+inline constexpr std::string_view kBackupFolder = "backup";
+
+/// Where the untouched original of `file` is kept: `<root>/backup/<its path
+/// under root>` when `file` is inside `root` (the game folder), otherwise
+/// `<file's folder>/backup/<file name>`.
+[[nodiscard]] std::filesystem::path backupPathFor(const std::filesystem::path& file,
+                                                  const std::filesystem::path& root = {});
+
+/// Where earlier versions kept it: "<file>.bak" beside it (still recognised).
+[[nodiscard]] std::filesystem::path legacyBackupPathFor(const std::filesystem::path& file);
+
+/// The backup that exists for `file` (the backup folder first, then a .bak), or empty.
+[[nodiscard]] std::filesystem::path findBackup(const std::filesystem::path& file,
+                                               const std::filesystem::path& root = {});
 
 /// Copies `file` to its backup path unless a backup already exists (an
 /// existing backup is the true original and is never overwritten).
 /// Returns the backup path.
-Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file);
+Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file, const std::filesystem::path& root = {});
 
 /// Copies the backup back over `file`. The file must not be open elsewhere.
-Result<void> restoreBackup(const std::filesystem::path& file);
+Result<void> restoreBackup(const std::filesystem::path& file, const std::filesystem::path& root = {});
 
 } // namespace viewer

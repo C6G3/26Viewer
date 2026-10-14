@@ -4,6 +4,8 @@
 
 #include "viewer/core/RandomAccessFile.hpp"
 
+
+#include <QDir>
 #include <QFileInfo>
 #include <QLocale>
 #include <QObject>
@@ -81,23 +83,40 @@ std::filesystem::path backupTarget(const VfsNode& node)
     return {};
 }
 
-bool hasBackup(const VfsNode& node)
+std::filesystem::path backupOf(const Session& session, const VfsNode& node)
 {
     const auto target = backupTarget(node);
-    std::error_code ec;
-    return !target.empty() && std::filesystem::exists(backupPathFor(target), ec);
+    return target.empty() ? std::filesystem::path{} : findBackup(target, session.vfs.backupRoot());
 }
 
-QFuture<EditResult> startBackup(std::filesystem::path target)
+bool hasBackup(const Session& session, const VfsNode& node)
 {
-    return QtConcurrent::run([target = std::move(target)] {
+    return !backupOf(session, node).empty();
+}
+
+QString backupDisplayName(const Session& session, const std::filesystem::path& backup)
+{
+    const std::filesystem::path& root = session.vfs.backupRoot();
+    const auto rel = root.empty() ? std::filesystem::path{} : backup.lexically_relative(root);
+    return QDir::toNativeSeparators(
+        toQString(!rel.empty() && *rel.begin() != ".." ? rel : backup));
+}
+
+bool restoresSingleFile(const VfsNode& node) noexcept
+{
+    return node.isFile() && node.archive() != nullptr;
+}
+
+QFuture<EditResult> startBackup(std::filesystem::path target, std::filesystem::path root)
+{
+    return QtConcurrent::run([target = std::move(target), root = std::move(root)] {
         EditResult result;
         result.kind = EditResult::Kind::Backup;
-        if (auto backup = ensureBackup(target); !backup)
+        if (auto backup = ensureBackup(target, root); !backup)
             result.error = toQString(backup.error().message);
         else
             result.summary = QObject::tr("Backed up %1 to %2")
-                                 .arg(toQString(target.filename()), toQString(backup->filename()));
+                                 .arg(toQString(target.filename()), QDir::toNativeSeparators(toQString(*backup)));
         return result;
     });
 }
@@ -108,7 +127,7 @@ QFuture<EditResult> startReplace(std::shared_ptr<Session> session, ReplacePlan p
         EditResult result;
         result.kind = EditResult::Kind::Replace;
         if (plan.backupFirst) {
-            if (auto backup = ensureBackup(Vfs::editTarget(*plan.node)); !backup) {
+            if (auto backup = ensureBackup(Vfs::editTarget(*plan.node), session->vfs.backupRoot()); !backup) {
                 result.error = toQString(backup.error().message);
                 return result;
             }
@@ -129,15 +148,46 @@ QFuture<EditResult> startReplace(std::shared_ptr<Session> session, ReplacePlan p
     });
 }
 
-QFuture<EditResult> startRestore(std::filesystem::path target)
+QFuture<EditResult> startRestore(std::filesystem::path target, std::filesystem::path root)
 {
-    return QtConcurrent::run([target = std::move(target)] {
+    return QtConcurrent::run([target = std::move(target), root = std::move(root)] {
         EditResult result;
         result.kind = EditResult::Kind::Restore;
-        if (auto ok = restoreBackup(target); !ok)
+        if (auto ok = restoreBackup(target, root); !ok)
             result.error = toQString(ok.error().message);
         else
             result.summary = QObject::tr("Restored the original %1").arg(toQString(target.filename()));
+        return result;
+    });
+}
+
+QFuture<EditResult> startRestoreFile(std::shared_ptr<Session> session, const VfsNode* node)
+{
+    return QtConcurrent::run([session = std::move(session), node] {
+        EditResult result;
+        result.kind = EditResult::Kind::Restore;
+        const auto fail = [&](const QString& message) {
+            result.error = message;
+            return result;
+        };
+        if (!node || !restoresSingleFile(*node))
+            return fail(QObject::tr("Only a file inside an archive can be restored on its own."));
+        const std::filesystem::path backup = backupOf(*session, *node);
+        auto data = session->vfs.readBackup(*node, session->content);
+        if (!data)
+            return fail(toQString(data.error().message));
+        if (auto current = session->vfs.read(*node); current && *current == *data) {
+            result.summary = QObject::tr("%1 is already the original").arg(toQString(node->name()));
+            result.unchanged = true;
+            return result;
+        }
+        auto report = session->vfs.replace(*node, *data);
+        if (!report)
+            return fail(toQString(report.error().message));
+        result.summary = QObject::tr("Restored the original %1 from %2")
+                             .arg(toQString(node->name()), backupDisplayName(*session, backup));
+        for (const auto& w : report->warnings)
+            result.warnings << toQString(w);
         return result;
     });
 }

@@ -4,6 +4,13 @@
 #include "BafBank.hpp"
 #include "ChunkFile.hpp"
 #include "Animation.hpp"
+#include "FlaskTable.hpp"
+#include "FontFile.hpp"
+#include "Level.hpp"
+#include "Localisation.hpp"
+#include "UiFontTable.hpp"
+#include "UiLayout.hpp"
+#include "UiPack.hpp"
 #include "ModelDecoder.hpp"
 #include "PakArchive.hpp"
 #include "Physics.hpp"
@@ -53,12 +60,19 @@ public:
         registry.addStructureParser(std::make_shared<ChunkStructureParser>());
         registry.addMeshDecoder(std::make_shared<ModelDecoder>());
         registry.addMeshDecoder(std::make_shared<LevelPhysicsDecoder>());
+        registry.addMeshDecoder(std::make_shared<LevelDecoder>());
         registry.addTextureDictionary(std::make_shared<ModelTextureDictionary>());
         registry.addSkeletonDecoder(std::make_shared<SkeletonFileDecoder>());
         registry.addAnimationDecoder(std::make_shared<CycleDecoder>());
+        registry.addFontDecoder(std::make_shared<PfFontDecoder>());
+        registry.addTextureDictionary(std::make_shared<UiPackTextures>());
+        registry.addDecompiler(std::make_shared<UiFontTableDecompiler>());
+        registry.addDrawingDecoder(std::make_shared<IpfDecoder>());
         registry.addSoundBankFormat(std::make_shared<BafFormat>());
         registry.addDecompiler(std::make_shared<AudioEntityDecompiler>());
         registry.addStructureParser(std::make_shared<AudioEntityStructureParser>());
+        registry.addDecompiler(std::make_shared<FlaskDecompiler>());
+        registry.addDecompiler(std::make_shared<LocTableDecompiler>());
 
         auto& t = registry.fileTypes();
         t.add({"pak", "Blur package", FileCategory::Archive});
@@ -73,14 +87,14 @@ public:
         t.add({"levelstream", "Level streaming archive (ARCH)", FileCategory::Level});
         t.add({"baf", "Audio bank (BANK)", FileCategory::Audio});
         t.add({"dat", "Audio/data table", FileCategory::Data});
-        t.add({"ipf", "UI layout", FileCategory::Data});
-        t.add({"bpr", "UI resource pack (BZR2)", FileCategory::Data});
-        t.add({"pf", "Bitmap font", FileCategory::Font});
+        t.add({"ipf", "UI vector layout", FileCategory::Texture});
+        t.add({"bpr", "UI texture pack", FileCategory::Texture});
+        t.add({"pf", "Font (outlines)", FileCategory::Font});
         t.add({"font", "Font", FileCategory::Font});
         t.add({"fxb", "Compiled shader effect", FileCategory::Shader});
-        t.add({"loc", "Localisation table", FileCategory::Data});
+        t.add({"loc", "Text table (all languages)", FileCategory::Data});
         t.add({"bin", "Game data table", FileCategory::Data});
-        t.add({"xt", "Data table", FileCategory::Data});
+        t.add({"xt", "Game data table", FileCategory::Data});
         t.add({"aid", "AI data", FileCategory::Data});
         t.add({"wbl", "Audio bank list", FileCategory::Text});
         t.add({"raw", "Raw data", FileCategory::Data});

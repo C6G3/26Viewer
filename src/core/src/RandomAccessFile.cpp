@@ -158,20 +158,44 @@ ScopedWritable::~ScopedWritable()
     }
 }
 
-std::filesystem::path backupPathFor(const std::filesystem::path& file)
+std::filesystem::path backupPathFor(const std::filesystem::path& file, const std::filesystem::path& root)
+{
+    namespace fs = std::filesystem;
+    if (!root.empty()) {
+        const fs::path rel = file.lexically_normal().lexically_relative(root.lexically_normal());
+        if (!rel.empty() && *rel.begin() != ".." && rel.is_relative())
+            return root / kBackupFolder / rel;
+    }
+    return file.parent_path() / kBackupFolder / file.filename();
+}
+
+std::filesystem::path legacyBackupPathFor(const std::filesystem::path& file)
 {
     auto backup = file;
     backup += ".bak";
     return backup;
 }
 
-Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file)
+std::filesystem::path findBackup(const std::filesystem::path& file, const std::filesystem::path& root)
+{
+    std::error_code ec;
+    for (const auto& candidate : {backupPathFor(file, root), legacyBackupPathFor(file)})
+        if (std::filesystem::is_regular_file(candidate, ec))
+            return candidate;
+    return {};
+}
+
+Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file, const std::filesystem::path& root)
 {
     namespace fs = std::filesystem;
-    const fs::path backup = backupPathFor(file);
+    if (fs::path existing = findBackup(file, root); !existing.empty())
+        return existing;
+    const fs::path backup = backupPathFor(file, root);
     std::error_code ec;
-    if (fs::exists(backup, ec))
-        return backup;
+    fs::create_directories(backup.parent_path(), ec);
+    if (ec)
+        return fail(ErrorCode::Io, "could not create the backup folder '{}': {}", displayPath(backup.parent_path()),
+                    ec.message());
 
     // Copy to a temporary name first so an interrupted copy never looks like a valid backup.
     fs::path temp = backup;
@@ -186,12 +210,11 @@ Result<std::filesystem::path> ensureBackup(const std::filesystem::path& file)
     return backup;
 }
 
-Result<void> restoreBackup(const std::filesystem::path& file)
+Result<void> restoreBackup(const std::filesystem::path& file, const std::filesystem::path& root)
 {
     namespace fs = std::filesystem;
-    const fs::path backup = backupPathFor(file);
-    std::error_code ec;
-    if (!fs::exists(backup, ec))
+    const fs::path backup = findBackup(file, root);
+    if (backup.empty())
         return fail(ErrorCode::NotFound, "no backup exists for '{}'", displayPath(file));
     const ScopedWritable writable(file);
     if (!writable.status())

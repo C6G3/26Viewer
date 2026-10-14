@@ -41,6 +41,9 @@ system, image decoders, the UI — is shared by every future game module.
     (double-click to view) and exported with the `.obj` (which has UVs and normals).
     *Collision* draws the shapes the game's physics uses, see-through over the model
     (a car's wheels, doors and bumpers; a prop's boxes and cylinders).
+  - **Whole levels** (Blur `levels/<track>/Level.levelrender` or `.levelstream`): the
+    track, buildings and every placed prop in 3D (Brighton: 4.7 million triangles),
+    grouped by scene node in the parts tree. Textures are not drawn yet.
   - **Level collision** (Blur `.levelphysics`): the track, walls and each route's
     barriers in 3D, coloured by surface (tarmac, grass, sand, water, armco…).
   - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV,
@@ -49,6 +52,15 @@ system, image decoders, the UI — is shared by every future game module.
   - **Blur audio entities** (`audio/dat/*.dat`): decompiled to readable text — the
     game's sound logic (inputs, curves, rolloffs, sounds and their waves, mixers)
     with links resolved to component names; the Structure tab lists the components.
+  - **Blur game data** (`gamedata/xt/*.bin`, `levels/*/actorpack.xt`): every table the
+    game is tuned with as readable text — car handling (`racingphysics.bin`), vehicles,
+    career, multiplayer, pickups, UI… — with text ids shown as their English text;
+    `.loc` text tables with all five languages.
+  - **Editing decompiled files**: *Edit* on a decompiled view (game data, texts,
+    audio entities, the UI font table) opens its text; change the values and *Save*
+    compiles them back into the file (through Edit Mode). Names and brackets must
+    stay; in game data tables lists can also get more or fewer items. A note above
+    the text says what can change, and a mistake names its line.
   - **Text** with line numbers, find, and colour coding (XML, INI, CSV, JSON, Lua,
     shaders, QuickBMS). *Edit* opens a text editor; saving goes through Edit Mode.
 - **Extraction** of a selection or everything, on a background thread with
@@ -68,18 +80,21 @@ system, image decoders, the UI — is shared by every future game module.
     texture, compressed to the DXT version you pick (the game's original is the
     default) with mip-maps made like the original's.
   - **Back up** explicitly: items in an archive without a backup show a red
-    *"not backed up"* banner with a **Back Up Now** button (saves
-    `<archive>.bak`). Replacing offers *Back Up & Replace*; nothing is backed up
-    behind your back.
-  - **Restore Original** from the backup.
+    *"not backed up"* banner with a **Back Up Now** button (copies the archive
+    into a `backup` folder in the game folder, e.g. `BLUR\backup\cache\root.pak`).
+    Replacing offers *Back Up & Replace*; nothing is backed up behind your back.
+  - **Restore Original** from the backup: on a file inside an archive it puts back
+    just that file (other changes in the archive stay); on an archive or loose
+    file, the whole thing.
 - **Picks up where you left off**: the last game (and open folder or file) reopens at
   start-up. Toggle with *File ▸ Reopen Last Game at Startup*. Settings live in
   `%APPDATA%\26Viewer\26Viewer.ini`.
 - **Modern Windows UI**: Windows 11 style, light/dark mode that follows the OS
   *live* (or forced via *View ▸ Theme*), Fluent icons, dark title bar,
   per-monitor high-DPI.
-- **CLI** (`26viewer-cli`) for scripted listing, verification, extraction and
-  `decompile` (audio entities → text).
+- **CLI** (`26viewer-cli`) for scripted listing, verification, extraction,
+  `decompile` (game data, texts, audio entities → text) and `replace` (an edited
+  `.txt` from `decompile` is compiled back).
 
 ## Supported games
 

@@ -36,6 +36,16 @@ void ContentRegistry::addAnimationDecoder(std::shared_ptr<const AnimationDecoder
     m_animationDecoders.push_back(std::move(decoder));
 }
 
+void ContentRegistry::addFontDecoder(std::shared_ptr<const FontDecoder> decoder)
+{
+    m_fontDecoders.push_back(std::move(decoder));
+}
+
+void ContentRegistry::addDrawingDecoder(std::shared_ptr<const DrawingDecoder> decoder)
+{
+    m_drawingDecoders.push_back(std::move(decoder));
+}
+
 void ContentRegistry::addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format)
 {
     m_soundBankFormats.push_back(std::move(format));
@@ -123,6 +133,22 @@ const SkeletonDecoder* ContentRegistry::findSkeletonDecoder(std::string_view ext
 const AnimationDecoder* ContentRegistry::findAnimationDecoder(std::string_view extension, ByteSpan data) const
 {
     for (const auto& d : m_animationDecoders | std::views::reverse)
+        if (d->canDecode(extension, data))
+            return d.get();
+    return nullptr;
+}
+
+const FontDecoder* ContentRegistry::findFontDecoder(std::string_view extension, ByteSpan data) const
+{
+    for (const auto& d : m_fontDecoders | std::views::reverse)
+        if (d->canDecode(extension, data))
+            return d.get();
+    return nullptr;
+}
+
+const DrawingDecoder* ContentRegistry::findDrawingDecoder(std::string_view extension, ByteSpan data) const
+{
+    for (const auto& d : m_drawingDecoders | std::views::reverse)
         if (d->canDecode(extension, data))
             return d.get();
     return nullptr;

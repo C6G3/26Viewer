@@ -153,8 +153,6 @@ public:
     void showAnimationFrame(float frame) { showFrame(frame); }
 
 signals:
-    /// "Textures": open the window listing the textures stored in the model.
-    void texturesRequested();
     /// "Animation…": choose an animation for the skeleton.
     void animationRequested();
 
@@ -188,7 +186,6 @@ private:
     QCheckBox* m_collision;
     QCheckBox* m_materials;
     QToolButton* m_paint;
-    QToolButton* m_textures;
     QComboBox* m_lod;
     std::vector<QTreeWidgetItem*> m_partItems; ///< Per Mesh part.
     bool m_updatingTree = false;

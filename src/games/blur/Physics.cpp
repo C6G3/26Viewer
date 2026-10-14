@@ -14,7 +14,8 @@
 // u32, u32 material (version >= 2), u32 flags, u32, f32, u32 handle,
 // f32 offset[3], u32, u32 (version >= 7). A car part's body has handle
 // 0xC00000nn, the render tag of the model element it moves with. `offset` is
-// the centre of mass; convex hull points are stored around it. The material
+// the centre of mass; convex hull points are stored around their body's
+// (a hull inside a body has an offset of its own, which isn't used for that). The material
 // is a surface type (see surfaceName); triangle meshes have one per triangle.
 //
 // Types and their fields (sizes and radii need version >= 4):
@@ -330,10 +331,15 @@ Result<Geometry> readMesh(Stream& s, std::uint32_t version)
 
 /// Reads one shape's fields (after its type word). Bodies (type 7) add their
 /// shapes to `children` with their places in the body; other shapes are returned.
+/// `body` is the base of the body the shape belongs to (null: a shape of its own).
 Result<Geometry> readShape(Stream& s, std::uint32_t type, std::uint32_t version, std::vector<Geometry>& children,
-                           std::vector<Placement>& childPlacements, std::size_t depth)
+                           std::vector<Placement>& childPlacements, std::size_t depth, const Base* body = nullptr)
 {
     const Base base = readBase(s, version);
+    // Convex hull points are stored around a centre of mass: a hull of its own
+    // around its own; one in a body (a car's bonnet, door, wing…) around the
+    // body's, which is added after the hull's place in the body has turned it.
+    const std::array<float, 3> centre = body ? std::array<float, 3>{0, 0, 0} : base.offset;
     const bool sized = version >= 4;
     Geometry g;
     switch (type) {
@@ -362,7 +368,7 @@ Result<Geometry> readShape(Stream& s, std::uint32_t type, std::uint32_t version,
         g = Geometry{"Convex hull", {}, {}, {}, 0, 0, true};
         g.positions.resize(std::size_t{nv} * 3);
         for (std::size_t i = 0; i < g.positions.size(); ++i) {
-            const float v = s.f32() + base.offset[i % 3]; // points are stored around the centre of mass
+            const float v = s.f32() + centre[i % 3];
             g.positions[i] = std::isfinite(v) ? v : 0.0f;
         }
         g.indices.resize(std::size_t{nt} * 3);
@@ -403,11 +409,14 @@ Result<Geometry> readShape(Stream& s, std::uint32_t type, std::uint32_t version,
             const std::uint32_t childType = s.u32();
             std::vector<Geometry> grand;
             std::vector<Placement> grandPlacements;
-            auto child = readShape(s, childType, version, grand, grandPlacements, depth + 1);
+            auto child = readShape(s, childType, version, grand, grandPlacements, depth + 1, &base);
             if (!child)
                 return std::unexpected(child.error());
             s.f32(); // in every version
-            const Placement place = readRotationThenPosition(s);
+            Placement place = readRotationThenPosition(s);
+            if (childType == 3)
+                for (int k = 0; k < 3; ++k)
+                    place.t[static_cast<std::size_t>(k)] += base.offset[static_cast<std::size_t>(k)];
             s.skip(9 * 4);
             for (std::size_t k = 0; k < grand.size(); ++k) {
                 children.push_back(std::move(grand[k]));

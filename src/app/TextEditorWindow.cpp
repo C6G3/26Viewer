@@ -17,9 +17,12 @@
 #include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStatusBar>
+#include <QTextBlock>
 #include <QToolBar>
+#include <QVBoxLayout>
 
 namespace viewer::app {
 
@@ -35,7 +38,22 @@ TextEditorWindow::TextEditorWindow(QWidget* parent)
 {
     using TI = QIcon::ThemeIcon;
     setAttribute(Qt::WA_DeleteOnClose);
-    setCentralWidget(m_view);
+
+    // A note above the text saying what can be changed (decompiled files only).
+    auto* central = new QWidget(this);
+    m_hint = new QLabel(central);
+    m_hint->setWordWrap(true);
+    m_hint->setAutoFillBackground(true);
+    m_hint->setBackgroundRole(QPalette::AlternateBase); // follows the light/dark theme
+    m_hint->setForegroundRole(QPalette::Text);
+    m_hint->setContentsMargins(10, 6, 10, 6);
+    m_hint->hide();
+    auto* column = new QVBoxLayout(central);
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(0);
+    column->addWidget(m_hint);
+    column->addWidget(m_view, 1);
+    setCentralWidget(central);
     m_view->setReadOnly(false);
     CodeEditor* editor = m_view->editor();
 
@@ -127,6 +145,37 @@ QString TextEditorWindow::open(std::shared_ptr<Session> session, const VfsNode* 
     auto bytes = session->vfs.read(*node);
     if (!bytes)
         return toQString(bytes.error().message);
+
+    // A binary file a decompiler can compile back: edit its text.
+    if (const TextDecompiler* decompiler =
+            session->content.findDecompiler(extensionOf(node->name()), *bytes)) {
+        if (!decompiler->canRecompile())
+            return tr("%1 can be viewed as text but not edited yet.").arg(toQString(node->name()));
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        auto text = decompiler->decompileWith(*bytes, session->vfs.decompileContext(*node));
+        QApplication::restoreOverrideCursor();
+        if (!text)
+            return tr("Can't read %1: %2").arg(toQString(node->name()), toQString(text.error().message));
+        m_session = std::move(session);
+        m_node = node;
+        m_decompiler = decompiler;
+        m_location = location;
+        m_name = toQString(node->name());
+        m_view->setText(toQString(*text), decompiler->syntax(),
+                        tr("%1  ·  %2: change the values, then Save").arg(toQString(node->virtualPath()),
+                                                                            toQString(decompiler->name())));
+        m_encoding->setVisible(false); // the file isn't stored as this text
+        m_lineEnding->setVisible(false);
+        m_hint->setText(QStringLiteral("ⓘ  ") + toQString(decompiler->editHint()));
+        m_hint->show();
+        m_view->editor()->document()->setModified(false);
+        m_view->editor()->document()->clearUndoRedoStacks();
+        updateTitle();
+        updateActions();
+        updatePosition();
+        return {};
+    }
+
     if (!bytes->empty() && !looksLikeText(*bytes))
         return tr("%1 doesn't look like a text file.").arg(toQString(node->name()));
     auto doc = decodeText(*bytes);
@@ -170,6 +219,18 @@ Result<ByteBuffer> TextEditorWindow::encoded() const
     // non-breaking spaces into spaces); blocks are separated by U+2029.
     QString text = m_view->editor()->document()->toRawText();
     text.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+    if (m_decompiler) {
+        // Compiled back into the file as it is now (it may have been saved before).
+        if (!m_session || !m_node)
+            return fail(ErrorCode::NotFound, "the file is no longer open");
+        auto original = m_session->vfs.read(*m_node);
+        if (!original)
+            return std::unexpected(original.error());
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        auto bytes = m_decompiler->recompile(*original, text.toStdString(), m_session->vfs.decompileContext(*m_node));
+        QApplication::restoreOverrideCursor();
+        return bytes;
+    }
     TextDocument doc;
     doc.text = text.toStdString();
     doc.encoding = static_cast<TextEncoding>(m_encoding->currentData().toInt());
@@ -183,9 +244,15 @@ void TextEditorWindow::save()
         return;
     auto bytes = encoded();
     if (!bytes) {
-        QMessageBox::warning(this, tr("Save"),
-                             tr("Can't save in %1: %2.\n\nPick another encoding in the status bar (e.g. UTF-8).")
-                                 .arg(m_encoding->currentText(), toQString(bytes.error().message)));
+        if (m_decompiler) {
+            showErrorLine(toQString(bytes.error().message));
+            QMessageBox::warning(this, tr("Save"),
+                                 tr("Can't save %1:\n\n%2").arg(m_name, toQString(bytes.error().message)));
+        } else {
+            QMessageBox::warning(this, tr("Save"),
+                                 tr("Can't save in %1: %2.\n\nPick another encoding in the status bar (e.g. UTF-8).")
+                                     .arg(m_encoding->currentText(), toQString(bytes.error().message)));
+        }
         m_closeAfterSave = false;
         return;
     }
@@ -208,7 +275,19 @@ void TextEditorWindow::saveFinished(bool ok)
 
 void TextEditorWindow::saveCopy()
 {
-    auto bytes = encoded();
+    // A decompiled file's copy is its text (as .txt); a text file's, the encoded text.
+    Result<ByteBuffer> bytes = ByteBuffer{};
+    QString name = m_name;
+    if (m_decompiler) {
+        QString text = m_view->editor()->document()->toRawText();
+        text.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+        const QByteArray utf8 = text.toUtf8();
+        bytes = ByteBuffer(reinterpret_cast<const std::byte*>(utf8.constData()),
+                           reinterpret_cast<const std::byte*>(utf8.constData()) + utf8.size());
+        name = QFileInfo(m_name).completeBaseName() + QStringLiteral(".txt");
+    } else {
+        bytes = encoded();
+    }
     if (!bytes) {
         QMessageBox::warning(this, tr("Save Copy As"), toQString(bytes.error().message));
         return;
@@ -216,7 +295,7 @@ void TextEditorWindow::saveCopy()
     QSettings settings;
     const QString dir = settings.value("paths/lastTextCopyDir").toString();
     const QString file =
-        QFileDialog::getSaveFileName(this, tr("Save a copy of %1").arg(m_name), dir.isEmpty() ? m_name : dir + '/' + m_name);
+        QFileDialog::getSaveFileName(this, tr("Save a copy of %1").arg(m_name), dir.isEmpty() ? name : dir + '/' + name);
     if (file.isEmpty())
         return;
     settings.setValue("paths/lastTextCopyDir", QFileInfo(file).absolutePath());
@@ -228,6 +307,21 @@ void TextEditorWindow::saveCopy()
         return;
     }
     statusBar()->showMessage(tr("Saved a copy to %1").arg(QDir::toNativeSeparators(file)), 8000);
+}
+
+void TextEditorWindow::showErrorLine(const QString& message)
+{
+    static const QRegularExpression pattern(QStringLiteral("^line (\\d+):"));
+    const auto match = pattern.match(message);
+    if (!match.hasMatch())
+        return;
+    const QTextBlock block = m_view->editor()->document()->findBlockByNumber(match.captured(1).toInt() - 1);
+    if (!block.isValid())
+        return;
+    QTextCursor cursor(block);
+    cursor.movePosition(QTextCursor::EndOfBlock, QTextCursor::KeepAnchor);
+    m_view->editor()->setTextCursor(cursor);
+    m_view->editor()->centerCursor();
 }
 
 void TextEditorWindow::updateTitle()

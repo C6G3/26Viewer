@@ -45,6 +45,9 @@ public:
     std::string_view name() const noexcept override { return "Blur audio entity"; }
     bool canDecompile(std::string_view extension, ByteSpan data) const override;
     Result<std::string> decompile(ByteSpan data) const override { return decompileAudioEntity(data); }
+    /// Numbers can be edited; links, names and list sizes stay.
+    bool canRecompile() const noexcept override { return true; }
+    Result<ByteBuffer> recompile(ByteSpan original, std::string_view text, const DecompileContext& context) const override;
     TextSyntax syntax() const noexcept override { return TextSyntax::Shader; } // C-style: // comments, numbers
 };
 

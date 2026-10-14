@@ -78,16 +78,37 @@ No shared code changes when a game is added or removed.
 - `Vfs::replace(node, data)` temporarily clears the read-only flag
   (`ScopedWritable`; game installs often mark archives read-only), then writes
   via the archive or as a loose file. It **never backs up by itself** —
-  backups are explicit: `ensureBackup(file)` saves `<file>.bak` once and never
-  overwrites it.
+  backups are explicit: `ensureBackup(file, root)` copies the file once into the
+  game's backup folder (`<root>/backup/<path under root>`, `root` being
+  `Vfs::backupRoot()`, the mounted install) and never overwrites it. Older
+  `<file>.bak` backups are still found (`findBackup`). Mounting skips the
+  top-level `backup` folder. `Vfs::readBackup(node)` reads one archive entry
+  from the archive's backup, so a single file can be put back.
 - App side: everything that writes is gated behind **Edit Mode**
   (`MainWindow::setEditMode`, off at start-up, confirmation required). In Edit
   Mode the preview shows a red banner for items whose archive/loose file has no
-  `.bak`, with *Back Up Now* (`startBackup`). `AssetEditor` validates
+  backup, with *Back Up Now* (`startBackup`). `AssetEditor` validates
   replacements (same extension; must still decode if the type has a decoder);
   the confirmation offers *Back Up & Replace* when no backup exists. After a
-  replace `MainWindow` reloads the session and reselects the item; restore
-  closes the session first, copies the backup back, then reopens.
+  replace `MainWindow` reloads the session and reselects the item. Restore
+  Original on a file inside an archive puts back just that file from the
+  archive's backup (`startRestoreFile`, a normal replace); on an archive or a
+  loose file it closes the session, copies the whole backup back, then reopens.
+- **Decompiled files** (`TextDecompiler`) are edited as their text when the
+  decompiler `canRecompile()`. Decompilers wrap each editable value in markers
+  (`EditableText::mark`); `changedValues(original, edited)` (core `TextEdit`)
+  lines the edited text up with a fresh decompile — words, brackets and line
+  breaks outside values must match, comments and spacing may differ — and
+  returns the changed values, which the decompiler's `recompile()` writes into
+  the original bytes. Lists marked with `EditableText::markList` may change
+  length: `resizedLists` reports them, and the decompiler resizes them first
+  (Blur data tables do). `editHint()` is the note the editor shows above the text. `TextEditorWindow` does this on Save, then hands the bytes
+  to the normal replace flow. `DecompileContext` (`core/FileContext.hpp`, from
+  `Vfs::decompileContext`) lets a decoder read the files around it: `readFolder`
+  (Blur: text tables for ids, other tables for record names) and `readSibling`, a
+  whole file from the same folder. `MeshDecoder::decodeWith` receives it too, so a
+  format split over two files (a Blur level's `.levelrender` + `.levelstream`)
+  opens from either one.
 
 ## Remembered state
 

@@ -47,6 +47,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
    - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
    - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups
+   - [x] Backups kept in `<game>/backup/` (same layout; old `.bak` files still recognised);
+     Restore Original on a file inside an archive puts back just that file
    - [ ] Test replaced Blur files in-game (normal archives, signed gamedata archives)
    - [ ] Batch replace: drop a folder whose layout mirrors the archive
 5. [ ] Status-bar breadcrumb and "Go to path…" (`Ctrl+L`) using `MainWindow::selectPath`
@@ -61,7 +63,10 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 
 ## Phase 4 — Deeper Blur support
 
-1. [ ] `ARCH` `.levelstream` archives (loose in `levels/`) → new `ArchiveFormat`
+1. [x] Levels: `.levelrender` + `.levelstream` (`ARCH`) decoded; every track opens in the 3D
+   viewer (static world + placed props, all 19 levels)
+   - [ ] Level textures (texture blocks + mips from levels 1–9)
+   - [ ] `Level.level` (adverts, navigation data, build log) as text
 2. [x] `.model` geometry: vertex/index buffers, all LODs, shadow hulls (see docs/formats/blur.md); next: part names, materials, UVs
 3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL)
    - [x] Real normals and UVs; material look per effect (paint colour, glass, lights, chrome); embedded textures listed and exported
@@ -71,8 +76,11 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Animation player for every model: `.cycle` decoding (all 805 in `root.pak`), skinned
      and rigid parts (vehicles, props), play/reverse/step/speed/timeline, picker tree showing
      only animations that fit the model's skeleton
-   - [ ] Document the `.skeleton` / `.cycle` / skinning layouts in docs/formats/blur.md
+   - [x] Studio lighting like the game's: key and fill lights, sky/ground ambient,
+     per-material highlights, sky reflections at grazing angles (paint, chrome, glass)
    - [ ] Translate the game's effects (`shaders-speed.pak`) for an exact match
+   - [ ] Add new textures to a model (insert into the scene stream, texture table and
+     material values; the per-texture ID is the exporter's, so a new one needs an unused value)
    - [x] Collision: a model's `Coll` shapes drawn over it ("Collision"); `.levelphysics`
      opens in the 3D viewer, coloured by surface material, one route layout at a time
 4. [x] `.baf` `BANK` audio → WAV export and playback (Qt Multimedia); import WAV folders and
@@ -80,9 +88,20 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 4b. [x] Bink `.bik` video playback (Qt Multimedia FFmpeg backend), audio track picker
 4c. [x] Text viewer/editor: colour coding (XML, INI, CSV, JSON, Lua, shaders, QuickBMS), encodings round-trip, saving through Edit Mode
 4d. [x] Audio entities (`audio/dat/*.dat`, JBOA) decompiled to text (preview, Export, CLI);
-   next: recompile edited text back into the game, name the fields per component type
-5. [ ] Data tables (`.bin`, `.loc`, `.xt`) → table view
-6. [ ] `.bpr` (`2RZB`) UI packs, `.ipf` layouts, `.pf` fonts
+   [x] edited numbers compile back; next: name the fields per component type
+5. [x] Data tables (`.bin`, `.xt` "Flask" packs incl. car handling; `.loc` texts) → decompiled text
+   - [x] Editable: Edit on any decompiled view; Save compiles the values back (core `TextEdit`)
+   - [x] Longer/shorter lists in data tables (new items copy the last one, with its linked objects)
+   - [ ] New or deleted records; first item of an empty list of links
+   - [ ] Test edited gamedata in-game (gamedata.pak has a .sig file)
+   - [ ] `.aid` AI route data
+6. [x] UI files (`cache/root.pak/ui/`): `.ipf` vector layouts (75: icon sheets, HUD, minimaps
+   — drawn as pictures, items side by side with their names), `ui_font_eur.dat` (font atlas
+   table, as text)
+   - [x] `.bpr` (`2RZB`) UI texture packs (4, ~300 textures): contact-sheet preview,
+     Textures… window to browse / export / replace
+   - [x] `.pf` fonts (5): vector outlines; preview with your own sample text ("The quick
+     brown fox…") at four sizes and every character in a grid
 7. [x] PAK hashes (recovered from Blur.exe, see docs/formats/blur.md): digest = SHA-1(stored),
    content hash = Σ ~CRC-32 per 32 KiB block, name hash = ~CRC-32 of the lower-case `\path`
 8. [ ] Add new files to archives (full repack: grow name table + file table, keep entries sorted by name hash)

@@ -20,6 +20,7 @@ class BackupBanner;
 class BusyOverlay;
 class HexView;
 class ImageView;
+class FontView;
 class ModelView;
 class SoundBankView;
 class TextView;
@@ -66,8 +67,6 @@ signals:
     void editRequested();
     /// The user asked to replace sound `index` of the shown bank.
     void replaceSoundRequested(int index);
-    /// The 3D view's "Textures" button.
-    void texturesRequested();
 
 private:
     enum Tab { PreviewTab, StructureTab, HexTab, PropertiesTab };
@@ -93,6 +92,7 @@ private:
     QLabel* m_message;
     ImageView* m_image;
     ModelView* m_model;
+    FontView* m_fontView;
     AnimationPickerState m_pickerState; ///< Where the animation picker was left for the model shown.
     SoundBankView* m_bankView;
     VideoView* m_video;

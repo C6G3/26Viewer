@@ -11,7 +11,8 @@ namespace viewer::games::blur {
 /// Bizarre Creations' tagged chunk container, used by .texture, .model,
 /// .font, .particlemesh, .level, .levelrender and .levelphysics.
 ///
-///   char name[]   NUL-terminated, padded with NULs to a multiple of 4
+///   char name[]   NUL-terminated, padded with NULs to a multiple of 4 (level
+///                 render files: a fixed 8-byte field, junk after the NUL)
 ///   u32  size     whole chunk including this header
 ///   u16  count    child count (containers)
 ///   u16  kind     'C' container / 'A' data

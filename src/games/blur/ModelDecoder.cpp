@@ -1109,36 +1109,64 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
     const bool hasRealGeometry = std::ranges::any_of(vbs, [](const VertexBuffer& vb) { return vb.offsets.size() > 1; });
     std::size_t skipped = untiled;
     std::size_t shadows = 0;
+    // Groups lie end to end in their buffer: a group whose vertices end where
+    // the buffer ends ("exact"), or where another group with its stream number
+    // starts ("chained"), sits in that buffer.
+    const auto exactFit = [&](const Group& group, std::size_t i) {
+        const std::uint32_t offset = group.stream ? group.stream->byteOffset : 0;
+        return fits(vbs[i], group) && vbs[i].count == offset / vbs[i].stride + group.vertexRange;
+    };
+    const auto chainFit = [&](const Group& group, std::size_t i) {
+        if (!group.stream || !fits(vbs[i], group))
+            return false;
+        const std::uint64_t end = std::uint64_t{group.stream->byteOffset} + group.vertexRange * vbs[i].stride;
+        return std::ranges::any_of(groups, [&](const Group& other) {
+            return &other != &group && other.stream && other.stream->buffer == group.stream->buffer
+                   && other.stream->byteOffset == end && fits(vbs[i], other);
+        });
+    };
+    // How many groups of a stream number line up in buffer i (one could be chance).
+    const auto lineUps = [&](std::uint32_t number, std::size_t i) {
+        return std::ranges::count_if(groups, [&](const Group& g) {
+            return g.stream && g.stream->buffer == number && (exactFit(g, i) || chainFit(g, i));
+        });
+    };
     for (const Group& group : groups) {
-        // Which vertex buffer: the solved stream mapping — unless another buffer
-        // fits the group exactly and the mapped one doesn't (all-zero streams on
-        // shadow hulls are placeholders) — else an exact fit, else the smallest fit.
-        const auto exactFit = [&](std::size_t i) {
-            const std::uint32_t offset = group.stream ? group.stream->byteOffset : 0;
-            return fits(vbs[i], group) && vbs[i].count == offset / vbs[i].stride + group.vertexRange;
-        };
+        // Which vertex buffer: the solved stream mapping — unless the group
+        // doesn't line up in it and does in another buffer (exactly, or chained
+        // where at least two groups of its number line up: buffer number 0 is
+        // shared by several buffers, and all-zero streams on shadow hulls are
+        // placeholders) — else an exact fit, a chained one, the smallest fit.
         std::optional<std::size_t> buffer;
         if (group.stream)
             if (const auto it = mapping.find(group.stream->buffer); it != mapping.end() && fits(vbs[it->second], group))
                 buffer = it->second;
-        if (buffer && !exactFit(*buffer))
-            for (std::size_t i = 0; i < vbs.size(); ++i)
-                if (i != *buffer && exactFit(i)) {
-                    buffer = i;
-                    break;
+        if (buffer && !exactFit(group, *buffer) && !chainFit(group, *buffer)) {
+            const auto mappedLineUps = lineUps(group.stream->buffer, *buffer);
+            std::optional<std::size_t> better;
+            for (std::size_t i = 0; i < vbs.size() && !better; ++i)
+                if (i != *buffer && exactFit(group, i))
+                    better = i;
+            for (std::size_t i = 0; i < vbs.size() && !better; ++i)
+                if (i != *buffer && chainFit(group, i)) {
+                    const auto n = lineUps(group.stream->buffer, i);
+                    if (n >= 2 && n > mappedLineUps)
+                        better = i;
                 }
+            if (better)
+                buffer = better;
+        }
         if (!buffer) {
-            const std::uint32_t offset = group.stream ? group.stream->byteOffset : 0;
-            for (std::size_t i = 0; i < vbs.size(); ++i) {
-                if (!fits(vbs[i], group))
-                    continue;
-                if (vbs[i].count == offset / vbs[i].stride + group.vertexRange) {
+            for (std::size_t i = 0; i < vbs.size() && !buffer; ++i)
+                if (exactFit(group, i))
                     buffer = i;
-                    break;
-                }
-                if (!buffer || vbs[i].count < vbs[*buffer].count)
+            for (std::size_t i = 0; i < vbs.size() && !buffer; ++i)
+                if (chainFit(group, i))
                     buffer = i;
-            }
+            for (std::size_t i = 0; i < vbs.size(); ++i)
+                if (fits(vbs[i], group) && (!buffer || (!exactFit(group, *buffer) && !chainFit(group, *buffer)
+                                                        && vbs[i].count < vbs[*buffer].count)))
+                    buffer = i;
         }
         if (!buffer) {
             ++skipped;

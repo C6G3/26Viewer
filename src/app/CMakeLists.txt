@@ -41,6 +41,8 @@ qt_add_executable(viewer_app WIN32
     VfsModel.hpp
     preview/AnimationSupport.cpp
     preview/AnimationSupport.hpp
+    preview/FontView.cpp
+    preview/FontView.hpp
     preview/HexView.cpp
     preview/HexView.hpp
     preview/ImageView.cpp

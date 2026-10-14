@@ -1,5 +1,6 @@
 #include "PreviewWindow.hpp"
 
+#include "Exporter.hpp"
 #include "Icons.hpp"
 #include "QtConvert.hpp"
 #include "TextureBrowser.hpp"
@@ -28,7 +29,6 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     connect(m_pane, &PreviewPane::backupRequested, this, &PreviewWindow::backupRequested);
     connect(m_pane, &PreviewPane::editRequested, this, &PreviewWindow::editRequested);
     connect(m_pane, &PreviewPane::replaceSoundRequested, this, &PreviewWindow::replaceSoundRequested);
-    connect(m_pane, &PreviewPane::texturesRequested, this, &PreviewWindow::showTextures);
 
     m_revealAction = new QAction(icons::theme(TI::GoUp, QStyle::SP_FileDialogToParent), tr("Show in &List"), this);
     m_revealAction->setStatusTip(tr("Select this file in the main window"));
@@ -59,6 +59,11 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     m_importAction->setEnabled(false);
     connect(m_importAction, &QAction::triggered, this, &PreviewWindow::importRequested);
 
+    m_texturesAction = new QAction(icons::forCategory(FileCategory::Texture), tr("&Textures…"), this);
+    m_texturesAction->setStatusTip(tr("The textures inside this file: browse, export, extract or replace them"));
+    m_texturesAction->setVisible(false);
+    connect(m_texturesAction, &QAction::triggered, this, &PreviewWindow::showTextures);
+
     auto* close = new QAction(tr("Close"), this);
     close->setShortcuts({QKeySequence(QKeySequence::Close), QKeySequence(Qt::CTRL | Qt::Key_W),
                          QKeySequence(Qt::Key_Escape)});
@@ -76,6 +81,8 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     toolbar->addAction(m_exportAction);
     toolbar->addAction(m_replaceAction);
     toolbar->addAction(m_importAction);
+    toolbar->addSeparator();
+    toolbar->addAction(m_texturesAction);
 
     statusBar(); // shows status tips and drag & drop feedback
     if (!restoreGeometry(QSettings().value("preview/geometry").toByteArray()))
@@ -98,6 +105,7 @@ void PreviewWindow::showNode(const VfsNode* node, bool properties)
     m_extractAction->setEnabled(node != nullptr);
     m_exportAction->setEnabled(node != nullptr);
     m_revealAction->setEnabled(node != nullptr);
+    m_texturesAction->setVisible(node && m_pane->session() && textureDictionary(*m_pane->session(), *node));
     setEditMode(m_editMode);
     updateTitle();
     // An open Textures window follows (after a replace the file is read again).

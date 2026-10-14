@@ -46,17 +46,17 @@ TEST_CASE("Read-only files can be replaced and stay read-only")
     Vfs vfs;
     vfs.mountDirectory(dir.path, content);
     const VfsNode& node = *vfs.root().children().at(0)->children().at(0);
-    REQUIRE(ensureBackup(file)); // works on read-only files too
+    REQUIRE(ensureBackup(file, dir.path)); // works on read-only files too
     REQUIRE(vfs.replace(node, asBytes("changed")));
 
     const auto now = readFile(file).value();
     CHECK(std::string(reinterpret_cast<const char*>(now.data()), now.size()) == "changed");
     CHECK((fs::status(file).permissions() & fs::perms::owner_write) == fs::perms::none);
-    REQUIRE(restoreBackup(file));
+    REQUIRE(restoreBackup(file, dir.path));
 
     // Allow cleanup.
     fs::permissions(file, fs::perms::owner_write, fs::perm_options::add);
-    fs::permissions(backupPathFor(file), fs::perms::owner_write, fs::perm_options::add);
+    fs::permissions(backupPathFor(file, dir.path), fs::perms::owner_write, fs::perm_options::add);
 }
 
 TEST_CASE("Loose files: mount, replace with backup, restore")
@@ -69,6 +69,7 @@ TEST_CASE("Loose files: mount, replace with backup, restore")
     Vfs vfs;
     const auto report = vfs.mountDirectory(dir.path, content);
     CHECK(report.files == 1);
+    CHECK(vfs.backupRoot() == dir.path);
 
     const VfsNode& sub = *vfs.root().children().at(0);
     const VfsNode& file = *sub.children().at(0);
@@ -78,26 +79,43 @@ TEST_CASE("Loose files: mount, replace with backup, restore")
 
     // Replacing never backs up by itself; that's the user's explicit choice.
     REQUIRE(vfs.replace(file, asBytes("unbacked")));
-    CHECK_FALSE(fs::exists(dir.path / "sub" / "a.txt.bak"));
+    CHECK(findBackup(dir.path / "sub" / "a.txt", dir.path).empty());
     REQUIRE(writeFile(dir.path / "sub" / "a.txt", asBytes("original")));
 
-    REQUIRE(ensureBackup(dir.path / "sub" / "a.txt"));
+    // Backups go in "<root>/backup", keeping the file's place under the root.
+    const fs::path backupFile = dir.path / "backup" / "sub" / "a.txt";
+    CHECK(backupPathFor(dir.path / "sub" / "a.txt", dir.path) == backupFile);
+    CHECK(backupPathFor(dir.path / "sub" / "a.txt") == dir.path / "sub" / "backup" / "a.txt"); // no root: beside it
+    REQUIRE(ensureBackup(dir.path / "sub" / "a.txt", vfs.backupRoot()));
+    CHECK(fs::exists(backupFile));
     auto replaced = vfs.replace(file, asBytes("new contents"));
     REQUIRE(replaced);
-    CHECK(replaced->backup == dir.path / "sub" / "a.txt.bak");
+    CHECK(replaced->backup == backupFile);
     CHECK(readFile(dir.path / "sub" / "a.txt").value() == ByteBuffer(asBytes("new contents").begin(), asBytes("new contents").end()));
 
     // Backing up again keeps the first backup (the true original).
     REQUIRE(vfs.replace(file, asBytes("third")));
-    REQUIRE(ensureBackup(dir.path / "sub" / "a.txt"));
-    const auto backup = readFile(dir.path / "sub" / "a.txt.bak").value();
+    REQUIRE(ensureBackup(dir.path / "sub" / "a.txt", vfs.backupRoot()));
+    const auto backup = readFile(backupFile).value();
     CHECK(std::string(reinterpret_cast<const char*>(backup.data()), backup.size()) == "original");
+
+    // The backup folder isn't part of what's browsed.
+    Vfs again;
+    CHECK(again.mountDirectory(dir.path, content).files == 1);
 
     // Restore must work while another part of the app still has the file open.
     auto openHandle = RandomAccessFile::open(dir.path / "sub" / "a.txt");
     REQUIRE(openHandle);
-    REQUIRE(restoreBackup(dir.path / "sub" / "a.txt"));
+    REQUIRE(restoreBackup(dir.path / "sub" / "a.txt", vfs.backupRoot()));
     openHandle->reset();
     const auto restored = readFile(dir.path / "sub" / "a.txt").value();
     CHECK(std::string(reinterpret_cast<const char*>(restored.data()), restored.size()) == "original");
+
+    // Backups made by earlier versions ("a.txt.bak" beside the file) still count.
+    fs::remove_all(dir.path / "backup");
+    REQUIRE(writeFile(dir.path / "sub" / "a.txt.bak", asBytes("older")));
+    CHECK(findBackup(dir.path / "sub" / "a.txt", dir.path) == dir.path / "sub" / "a.txt.bak");
+    REQUIRE(restoreBackup(dir.path / "sub" / "a.txt", dir.path));
+    const auto older = readFile(dir.path / "sub" / "a.txt").value();
+    CHECK(std::string(reinterpret_cast<const char*>(older.data()), older.size()) == "older");
 }

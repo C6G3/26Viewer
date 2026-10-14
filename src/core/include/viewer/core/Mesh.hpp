@@ -2,6 +2,7 @@
 
 #include "viewer/core/Bytes.hpp"
 #include "viewer/core/Error.hpp"
+#include "viewer/core/FileContext.hpp"
 #include "viewer/core/Image.hpp"
 
 #include <array>
@@ -97,6 +98,14 @@ public:
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual bool canDecode(std::string_view extension, ByteSpan data) const = 0;
     [[nodiscard]] virtual Result<Mesh> decode(ByteSpan data) const = 0;
+    /// The same, reading the files around it where the format needs them.
+    /// `data` may be only the start of a big file; decoders that need all of
+    /// it read it again through the context.
+    [[nodiscard]] virtual Result<Mesh> decodeWith(ByteSpan data, const DecompileContext& context) const
+    {
+        (void)context;
+        return decode(data);
+    }
 };
 
 namespace mesh {

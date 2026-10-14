@@ -103,6 +103,11 @@ public:
     /// entries are always read whole because they are compressed).
     [[nodiscard]] Result<ByteBuffer> read(const VfsNode& node, std::uint64_t limit = UINT64_MAX) const;
 
+    /// Lets a decompiler read the files around `node` (folders are looked up
+    /// in the archive holding it, or from the top of the tree for loose files).
+    /// The context must not outlive this Vfs.
+    [[nodiscard]] DecompileContext decompileContext(const VfsNode& node) const;
+
     /// Random access to a file node (big containers: read only what's needed).
     /// The source must not outlive this Vfs.
     [[nodiscard]] static Result<std::shared_ptr<const ByteSource>> source(const VfsNode& node);
@@ -118,8 +123,18 @@ public:
     /// archive containing it, or the loose file itself.
     [[nodiscard]] static std::filesystem::path editTarget(const VfsNode& node);
 
+    /// The folder backups are kept under (see backupPathFor): the mounted
+    /// directory, or the folder of a lone archive, unless set otherwise.
+    [[nodiscard]] const std::filesystem::path& backupRoot() const noexcept { return m_backupRoot; }
+    /// For a lone archive that belongs to a game install: that install's folder.
+    void setBackupRoot(std::filesystem::path root) { m_backupRoot = std::move(root); }
+
+    /// What `node` held when its archive (or the loose file) was backed up,
+    /// read from that backup — to put back one file of a changed archive.
+    [[nodiscard]] Result<ByteBuffer> readBackup(const VfsNode& node, const ContentRegistry& content) const;
+
     /// Replaces a file's contents on disk while keeping its name. Does NOT
-    /// back up — call ensureBackup(editTarget(node)) first if wanted (the app
+    /// back up — call ensureBackup(editTarget(node), backupRoot()) first if wanted (the app
     /// leaves that choice to the user). The mounted tree is stale afterwards:
     /// mount again to see the change. ReplaceReport::backup names an existing
     /// backup, if there is one.
@@ -133,6 +148,7 @@ private:
 
     std::unique_ptr<VfsNode> m_root;
     std::vector<std::unique_ptr<Archive>> m_archives;
+    std::filesystem::path m_backupRoot;
 };
 
 /// Removes "..", drive letters and leading slashes so an archive entry can

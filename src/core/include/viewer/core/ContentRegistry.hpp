@@ -1,6 +1,8 @@
 #pragma once
 
 #include "viewer/core/Animation.hpp"
+#include "viewer/core/Drawing.hpp"
+#include "viewer/core/Font.hpp"
 #include "viewer/core/Archive.hpp"
 #include "viewer/core/Audio.hpp"
 #include "viewer/core/FileTypes.hpp"
@@ -9,6 +11,7 @@
 #include "viewer/core/Text.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -102,6 +105,30 @@ public:
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual bool canDecompile(std::string_view extension, ByteSpan data) const = 0;
     [[nodiscard]] virtual Result<std::string> decompile(ByteSpan data) const = 0;
+    /// The same, looking up names in the files around it where it can.
+    [[nodiscard]] virtual Result<std::string> decompileWith(ByteSpan data, const DecompileContext& context) const
+    {
+        (void)context;
+        return decompile(data);
+    }
+    /// True if an edited copy of the text can be written back (recompile()).
+    [[nodiscard]] virtual bool canRecompile() const noexcept { return false; }
+    /// `original` with the values changed in `text` — an edited copy of what
+    /// decompileWith(original, context) gave — written in. Errors name the
+    /// line ("line 12: …").
+    [[nodiscard]] virtual Result<ByteBuffer> recompile(ByteSpan original, std::string_view text,
+                                                       const DecompileContext& context) const
+    {
+        (void)original;
+        (void)text;
+        (void)context;
+        return fail(ErrorCode::Unsupported, "{} can't be edited", name());
+    }
+    /// What may be changed in the text, shown above it while editing.
+    [[nodiscard]] virtual std::string_view editHint() const noexcept
+    {
+        return "Change the values only. Field names, brackets and list lengths must stay the same.";
+    }
     /// Colour coding for the text.
     [[nodiscard]] virtual TextSyntax syntax() const noexcept { return TextSyntax::Plain; }
 };
@@ -125,6 +152,8 @@ public:
     void addTextureDictionary(std::shared_ptr<const TextureDictionaryFormat> format);
     void addSkeletonDecoder(std::shared_ptr<const SkeletonDecoder> decoder);
     void addAnimationDecoder(std::shared_ptr<const AnimationDecoder> decoder);
+    void addFontDecoder(std::shared_ptr<const FontDecoder> decoder);
+    void addDrawingDecoder(std::shared_ptr<const DrawingDecoder> decoder);
 
     /// Finds a format able to open `path` (extension filter, then header probe).
     [[nodiscard]] const ArchiveFormat* findArchiveFormat(const std::filesystem::path& path) const;
@@ -137,6 +166,8 @@ public:
     [[nodiscard]] const TextureDictionaryFormat* findTextureDictionary(std::string_view extension, ByteSpan data) const;
     [[nodiscard]] const SkeletonDecoder* findSkeletonDecoder(std::string_view extension, ByteSpan data) const;
     [[nodiscard]] const AnimationDecoder* findAnimationDecoder(std::string_view extension, ByteSpan data) const;
+    [[nodiscard]] const FontDecoder* findFontDecoder(std::string_view extension, ByteSpan data) const;
+    [[nodiscard]] const DrawingDecoder* findDrawingDecoder(std::string_view extension, ByteSpan data) const;
 
     [[nodiscard]] const auto& archiveFormats() const noexcept { return m_archiveFormats; }
 
@@ -151,6 +182,8 @@ private:
     std::vector<std::shared_ptr<const TextureDictionaryFormat>> m_textureDictionaries;
     std::vector<std::shared_ptr<const SkeletonDecoder>> m_skeletonDecoders;
     std::vector<std::shared_ptr<const AnimationDecoder>> m_animationDecoders;
+    std::vector<std::shared_ptr<const FontDecoder>> m_fontDecoders;
+    std::vector<std::shared_ptr<const DrawingDecoder>> m_drawingDecoders;
 };
 
 /// Registers handlers shared by all games: common file types, DDS decoding.

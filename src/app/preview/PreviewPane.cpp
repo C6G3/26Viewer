@@ -6,6 +6,7 @@
 #include "AnimationSupport.hpp"
 #include "HexView.hpp"
 #include "ImageView.hpp"
+#include "FontView.hpp"
 #include "ModelView.hpp"
 #include "SoundBankView.hpp"
 #include "TextView.hpp"
@@ -14,6 +15,8 @@
 #include "viewer/core/Text.hpp"
 
 #include <QDateTime>
+#include <QPainter>
+#include <QPainterPath>
 #include <QDir>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -26,6 +29,8 @@
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
 
+#include <algorithm>
+#include <cmath>
 #include <optional>
 
 namespace viewer::app {
@@ -48,12 +53,16 @@ struct PreviewResult {
     bool hasText = false;
     TextSyntax syntax = TextSyntax::Plain;
     QString textInfo; ///< "UTF-16 LE · CRLF"
-    bool decompiled = false; ///< Text made from a binary file: can't be edited as text.
+    bool decompiled = false;   ///< Text made from a binary file…
+    bool recompilable = false; ///< …whose edited values can be written back (Edit).
     bool textTruncated = false;
 
     std::shared_ptr<const Mesh> mesh;
     QString meshError;
     SkeletonMatch skeleton; ///< The skeleton (and own animation) the model is posed with.
+
+    std::shared_ptr<const Font> font;
+    QString fontError;
 
     std::shared_ptr<const SoundBank> bank;
     bool bankRebuildable = false; ///< Its sounds can be replaced (not a plain .wav).
@@ -77,6 +86,98 @@ QString exactSize(std::uint64_t bytes)
     return QStringLiteral("%1 bytes (%2)")
         .arg(locale.toString(static_cast<qulonglong>(bytes)),
              locale.formattedDataSize(static_cast<qint64>(bytes), 1, QLocale::DataSizeTraditionalFormat));
+}
+
+/// All the textures of a texture pack side by side (largest level, scaled to a
+/// thumbnail), each with its name under it — the preview of a .bpr.
+QImage textureSheet(const TextureDictionaryFormat& format, ByteSpan data, std::size_t& count, QString& error)
+{
+    auto list = format.list(data);
+    if (!list) {
+        error = toQString(list.error().message);
+        return {};
+    }
+    count = list->size();
+    if (list->empty())
+        return {};
+    constexpr int kThumb = 160, kLabel = 22, kGap = 8;
+    // Roughly square overall (a little wider than tall), at most 16 across.
+    const int columns = std::clamp(static_cast<int>(std::ceil(std::sqrt(static_cast<double>(list->size()) * 1.5))), 1,
+                                   std::min<int>(16, static_cast<int>(list->size())));
+    const int rows = (static_cast<int>(list->size()) + columns - 1) / columns;
+    QImage sheet(columns * (kThumb + kGap) + kGap, rows * (kThumb + kLabel + kGap) + kGap, QImage::Format_ARGB32_Premultiplied);
+    sheet.fill(Qt::transparent);
+    QPainter painter(&sheet);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+    QFont font = painter.font();
+    font.setPixelSize(12);
+    painter.setFont(font);
+    painter.setPen(QColor(0x8a, 0x8a, 0x8a)); // readable on light and dark backgrounds
+    for (std::size_t i = 0; i < list->size(); ++i) {
+        const QRect cell(kGap + static_cast<int>(i % columns) * (kThumb + kGap),
+                         kGap + static_cast<int>(i / columns) * (kThumb + kLabel + kGap), kThumb, kThumb);
+        if (auto s = format.surfaces(data, i)) {
+            const std::size_t top = image::surfaceSize(s->format, s->width, s->height);
+            if (auto img = image::decodeSurface(ByteSpan(s->data).first(std::min(top, s->data.size())), s->format,
+                                                s->width, s->height)) {
+                const QImage view(img->rgba.data(), static_cast<int>(img->width), static_cast<int>(img->height),
+                                  static_cast<qsizetype>(img->width) * 4, QImage::Format_RGBA8888);
+                const QImage thumb = view.scaled(kThumb, kThumb, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                painter.drawImage(cell.center() - QPoint(thumb.width() / 2, thumb.height() / 2), thumb);
+            }
+        }
+        const QRect label(cell.left(), cell.bottom() + 2, kThumb, kLabel);
+        painter.drawText(label, Qt::AlignHCenter | Qt::AlignTop,
+                         painter.fontMetrics().elidedText(toQString((*list)[i].name), Qt::ElideMiddle, kThumb));
+    }
+    return sheet;
+}
+
+/// A vector drawing as a picture (`pixels` across), on a transparent background.
+QImage renderDrawing(const Drawing& drawing, int pixels)
+{
+    const double scale = pixels / std::max(drawing.width, drawing.height);
+    QImage image(std::max(1, static_cast<int>(drawing.width * scale)), std::max(1, static_cast<int>(drawing.height * scale)),
+                 QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.scale(scale, scale);
+    for (const Drawing::Shape& shape : drawing.shapes) {
+        // One path per shape so the triangles meet without seams. Fills are
+        // fans over their outline: overlaps cancel out (even-odd), which leaves
+        // the holes and hollows. Outlines are strips: their overlaps add up.
+        QPainterPath path;
+        path.setFillRule(shape.outline ? Qt::WindingFill : Qt::OddEvenFill);
+        for (std::size_t i = 0; i + 2 < shape.triangles.size(); i += 3) {
+            const auto& a = shape.triangles[i];
+            const auto& b = shape.triangles[i + 1];
+            const auto& c = shape.triangles[i + 2];
+            // Strip triangles alternate their winding: make each one count the same.
+            const bool turn = shape.outline && (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0;
+            path.addPolygon(QPolygonF{QPointF(a[0], a[1]), turn ? QPointF(c[0], c[1]) : QPointF(b[0], b[1]),
+                                      turn ? QPointF(b[0], b[1]) : QPointF(c[0], c[1])});
+            path.closeSubpath();
+        }
+        painter.setBrush(QColor::fromRgbF(shape.color[0], shape.color[1], shape.color[2], shape.color[3]));
+        painter.drawPath(path);
+    }
+    // Names under the items of a sheet.
+    if (!drawing.labels.empty()) {
+        painter.resetTransform();
+        QFont font = painter.font();
+        font.setPixelSize(std::max(12, static_cast<int>(96 * scale)));
+        painter.setFont(font);
+        painter.setPen(QColor(0x8a, 0x8a, 0x8a)); // readable on light and dark backgrounds
+        for (const Drawing::Label& label : drawing.labels) {
+            const QRectF box(label.x * scale, label.y * scale, label.width * scale, font.pixelSize() * 1.6);
+            painter.drawText(box, Qt::AlignHCenter | Qt::AlignTop,
+                             painter.fontMetrics().elidedText(toQString(label.text), Qt::ElideMiddle,
+                                                              static_cast<int>(box.width())));
+        }
+    }
+    return image;
 }
 
 /// Decodes up to kTextLimit bytes of text and notes its encoding and line endings.
@@ -174,6 +275,23 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
         } else {
             r->imageError = toQString(img.error().message);
         }
+    } else if (const DrawingDecoder* layout = session->content.findDrawingDecoder(ext, span)) {
+        // A vector drawing, drawn as a picture.
+        if (auto drawing = layout->decode(span)) {
+            r->image = renderDrawing(*drawing, drawing->labels.empty() ? 2048 : 4096);
+            r->imageInfo = QObject::tr("Vector drawing · %n shape(s)", nullptr, static_cast<int>(drawing->shapes.size()));
+            for (const std::string& note : drawing->notes)
+                r->imageInfo += QStringLiteral("  ·  ") + toQString(note);
+        } else {
+            r->imageError = toQString(drawing.error().message);
+        }
+    } else if (const TextureDictionaryFormat* pack = session->content.findTextureDictionary(ext, span);
+               pack && !session->content.findMeshDecoder(ext, span)) {
+        // A pack of textures (a model's are shown with the model instead).
+        std::size_t count = 0;
+        r->image = textureSheet(*pack, span, count, r->imageError);
+        r->imageInfo = QObject::tr("%n texture(s) — Textures… (toolbar) to browse, export or replace them", nullptr,
+                                   static_cast<int>(count));
     } else if (type.category == FileCategory::Texture) {
         QImage img; // formats Qt reads natively (PNG, JPEG, BMP, GIF...)
         if (img.loadFromData(reinterpret_cast<const uchar*>(data->data()), static_cast<int>(data->size()))) {
@@ -192,23 +310,33 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
 
     // 3D model
     if (const MeshDecoder* decoder = session->content.findMeshDecoder(ext, span)) {
-        if (auto mesh = decoder->decode(span)) {
+        if (auto mesh = decoder->decodeWith(span, session->vfs.decompileContext(*node))) {
             r->mesh = std::make_shared<const Mesh>(std::move(*mesh));
             r->skeleton = findSkeleton(*session, *node, *r->mesh);
         } else
             r->meshError = toQString(mesh.error().message);
     }
 
+    // Font
+    if (const FontDecoder* decoder = session->content.findFontDecoder(ext, span)) {
+        if (auto font = decoder->decode(span))
+            r->font = std::make_shared<const Font>(std::move(*font));
+        else
+            r->fontError = toQString(font.error().message);
+    }
+
     r->bytes = QByteArray(reinterpret_cast<const char*>(data->data()), static_cast<qsizetype>(data->size()));
 
     // Text: a decompiler's reading of a binary file, or the file itself
     if (const TextDecompiler* decompiler = session->content.findDecompiler(ext, span)) {
-        if (auto text = decompiler->decompile(span)) {
+        if (auto text = decompiler->decompileWith(span, session->vfs.decompileContext(*node))) {
             r->text = toQString(*text);
             r->hasText = true;
             r->decompiled = true;
+            r->recompilable = decompiler->canRecompile();
             r->syntax = decompiler->syntax();
-            r->textInfo = QObject::tr("%1, decompiled (read-only)").arg(toQString(decompiler->name()));
+            r->textInfo = r->recompilable ? QObject::tr("%1, decompiled (Edit to change values)").arg(toQString(decompiler->name()))
+                                          : QObject::tr("%1, decompiled (read-only)").arg(toQString(decompiler->name()));
         } else {
             r->structureError = toQString(text.error().message);
         }
@@ -241,7 +369,7 @@ PreviewPane::PreviewPane(QWidget* parent)
       m_title(new QLabel(this)), m_subtitle(new QLabel(this)),
       m_banner(new BackupBanner(this)), m_tabs(new QTabWidget(this)),
       m_previewStack(new QStackedWidget(this)), m_message(new QLabel(this)), m_image(new ImageView(this)),
-      m_model(new ModelView(this)), m_bankView(new SoundBankView(this)), m_video(new VideoView(this)),
+      m_model(new ModelView(this)), m_fontView(new FontView(this)), m_bankView(new SoundBankView(this)), m_video(new VideoView(this)),
       m_text(new TextView(this)), m_structure(new QTreeWidget(this)), m_hex(new HexView(this)),
       m_properties(new QTreeWidget(this))
 {
@@ -262,12 +390,12 @@ PreviewPane::PreviewPane(QWidget* parent)
     m_text->setEditButtonVisible(true);
     connect(m_text, &TextView::editRequested, this, &PreviewPane::editRequested);
     connect(m_bankView, &SoundBankView::replaceSoundRequested, this, &PreviewPane::replaceSoundRequested);
-    connect(m_model, &ModelView::texturesRequested, this, &PreviewPane::texturesRequested);
     connect(m_model, &ModelView::animationRequested, this, &PreviewPane::chooseAnimation);
     m_previewStack->addWidget(m_message);
     m_previewStack->addWidget(m_image);
     m_previewStack->addWidget(m_text);
     m_previewStack->addWidget(m_model);
+    m_previewStack->addWidget(m_fontView);
     m_previewStack->addWidget(m_bankView);
     m_previewStack->addWidget(m_video);
 
@@ -362,6 +490,7 @@ void PreviewPane::display(const VfsNode* node, int forcedTab)
     m_image->clear();
     m_text->clear();
     m_model->clear();
+    m_fontView->clear();
     m_bankView->clear();
     m_video->clear();
     m_structure->clear();
@@ -430,6 +559,9 @@ void PreviewPane::applyResult(const PreviewResult& result)
         if (result.skeleton.animation)
             m_model->setAnimation(result.skeleton.animation, result.skeleton.animationSource);
         m_previewStack->setCurrentWidget(m_model);
+    } else if (result.font) {
+        m_fontView->setTypeface(result.font);
+        m_previewStack->setCurrentWidget(m_fontView);
     } else if (!result.image.isNull()) {
         m_image->setImage(result.image, result.imageInfo);
         m_previewStack->setCurrentWidget(m_image);
@@ -439,7 +571,7 @@ void PreviewPane::applyResult(const PreviewResult& result)
         if (result.textTruncated)
             info += tr("  ·  showing the first %1").arg(QLocale().formattedDataSize(kTextLimit));
         m_text->setText(result.text, result.syntax, info);
-        m_text->setEditButtonVisible(!result.decompiled);
+        m_text->setEditButtonVisible(!result.decompiled || result.recompilable);
         m_previewStack->setCurrentWidget(m_text);
     } else {
         hasPreview = false;
@@ -447,6 +579,8 @@ void PreviewPane::applyResult(const PreviewResult& result)
             showMessage(tr("Could not read the audio: %1").arg(result.bankError));
         else if (!result.meshError.isEmpty())
             showMessage(tr("Could not read the model: %1").arg(result.meshError));
+        else if (!result.fontError.isEmpty())
+            showMessage(tr("Could not read the font: %1").arg(result.fontError));
         else if (result.isVideo)
             showMessage(tr("This video is too large to play from inside an archive. Extract it instead."));
         else

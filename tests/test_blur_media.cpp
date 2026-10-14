@@ -527,6 +527,34 @@ TEST_CASE("Real Blur models and audio banks (set BLUR_DIR to enable)")
     REQUIRE(texture("paintdent"));
     CHECK(car->textures.size() >= 15);
 
+    // Sub-meshes whose stream number several buffers share (0) find their own
+    // buffer: no triangle stretches across the car (the ratrod's inner body and
+    // engine, the shield pickup's rings, the Viper's interior).
+    for (const char* name : {"models/vehicles/ratrod_na_stock.model", "shieldsuper.model",
+                             "models/vehicles/dodge_viperacr_stock.model", "models/vehicles/corvette_c3_rat.model"}) {
+        INFO(name);
+        const auto at = find(name);
+        REQUIRE(at);
+        auto model = ModelDecoder().decode((*pak)->read(*at).value());
+        REQUIRE(model);
+        const auto length = [&](std::uint32_t a, std::uint32_t b) {
+            const float* p = &model->positions[3 * a];
+            const float* q = &model->positions[3 * b];
+            return std::hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+        };
+        std::size_t stretched = 0;
+        for (const Mesh::Part& part : model->parts) {
+            if (model->isHelper(part) || part.lods.empty())
+                continue;
+            const Mesh::Range& r = part.lods[0];
+            for (std::uint32_t i = r.firstIndex; i + 2 < r.firstIndex + r.indexCount; i += 3) {
+                const std::uint32_t a = model->indices[i], b = model->indices[i + 1], c = model->indices[i + 2];
+                stretched += std::max({length(a, b), length(b, c), length(c, a)}) > 2.5f;
+            }
+        }
+        CHECK(stretched == 0);
+    }
+
     const auto engine = find("audio/toyota_i6.baf");
     REQUIRE(engine);
     auto bank = BafFormat().open((*pak)->openEntry(*engine).value());
@@ -828,6 +856,29 @@ TEST_CASE("Blur audio entities parse and decompile to readable text")
     REQUIRE(tree);
     CHECK(tree->children[1].children.size() == 3);
 
+    // Numbers can be edited and written back; links can't.
+    REQUIRE(decompiler.canRecompile());
+    auto same = decompiler.recompile(data, *text, {});
+    REQUIRE(same);
+    CHECK(*same == data);
+    std::string edited = *text;
+    edited.replace(edited.find("param 5   = 300"), 15, "param 5   = 450.5");
+    edited.replace(edited.find("(default 0)"), 11, "(default 0.25)");
+    edited.replace(edited.find("update_rate 6"), 13, "update_rate 3");
+    auto rebuilt = decompiler.recompile(data, edited, {});
+    REQUIRE(rebuilt);
+    CHECK(rebuilt->size() == data.size());
+    auto again = decompileAudioEntity(*rebuilt);
+    REQUIRE(again);
+    CHECK(again->find("param 5   = 450.5") != std::string::npos);
+    CHECK(again->find("<- #1:0 Fade (default 0.25)") != std::string::npos);
+    CHECK(parseAudioEntity(*rebuilt)->updateRate == 3);
+    std::string relinked = *text;
+    relinked.replace(relinked.find("<- #1:0 Fade"), 12, "<- #0:0 Speed");
+    auto refused = decompiler.recompile(data, relinked, {});
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().message.starts_with("line "));
+
     ByteBuffer cut(data.begin(), data.begin() + 40); // a record running past the end
     CHECK_FALSE(parseAudioEntity(cut));
     ByteBuffer unknown = data;
@@ -859,6 +910,10 @@ TEST_CASE("Every real Blur audio entity decompiles (set BLUR_DIR to enable)")
         auto text = decompileAudioEntity(data);
         REQUIRE(text);
         CHECK(text->find("entity \"" + e->name + "\"") != std::string::npos);
+        // The text compiles back to the same file.
+        auto same = AudioEntityDecompiler().recompile(data, *text, {});
+        REQUIRE(same);
+        CHECK(*same == data);
         ++checked;
     }
     CHECK(checked == 365);

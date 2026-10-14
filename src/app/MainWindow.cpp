@@ -230,7 +230,8 @@ void MainWindow::buildActions()
     connect(m_replaceAction, &QAction::triggered, this, &MainWindow::replaceSelected);
 
     m_restoreAction = new QAction(icons::theme(TI::EditUndo, QStyle::SP_ArrowBack), tr("Restore &Original…"), this);
-    m_restoreAction->setStatusTip(tr("Put back the original archive / file from its .bak backup"));
+    m_restoreAction->setStatusTip(
+        tr("Put back the original from the backup: one file inside an archive, or a whole archive / loose file"));
     connect(m_restoreAction, &QAction::triggered, this, &MainWindow::restoreOriginal);
 
     m_editTextAction = new QAction(icons::theme(TI::DocumentProperties, QStyle::SP_FileDialogDetailedView),
@@ -990,11 +991,16 @@ bool MainWindow::isEditableText(const VfsNode* node, bool sniff) const
     const FileCategory category = m_session->content.fileTypes().lookup(node->name()).category;
     if (category == FileCategory::Text)
         return true;
-    // Unknown types may still be text (configs with odd extensions): peek at the start.
-    if (!sniff || (category != FileCategory::Unknown && category != FileCategory::Data) || node->size() > (16u << 20))
+    if ((category != FileCategory::Unknown && category != FileCategory::Data) || node->size() > (16u << 20))
         return false;
+    // Binary data a decompiler can compile back (game tables) is edited as its text.
     const auto head = m_session->vfs.read(*node, 4096);
-    return head && !head->empty() && looksLikeText(*head);
+    if (!head || head->empty())
+        return false;
+    if (const TextDecompiler* d = m_session->content.findDecompiler(extensionOf(node->name()), *head))
+        return d->canRecompile();
+    // Unknown types may still be text (configs with odd extensions): peek at the start.
+    return sniff && looksLikeText(*head);
 }
 
 void MainWindow::openTextEditor(const VfsNode* node)
@@ -1157,7 +1163,7 @@ void MainWindow::updateBackupBanner()
     // Only while editing is possible, and only for things that can actually be backed up.
     const auto warningFor = [this](const VfsNode* node) {
         const auto target = node && m_session ? backupTarget(*node) : std::filesystem::path{};
-        return m_editMode && !target.empty() && !hasBackup(*node) ? toQString(target.filename()) : QString();
+        return m_editMode && !target.empty() && !hasBackup(*m_session, *node) ? toQString(target.filename()) : QString();
     };
     m_folderView->banner()->setWarning(warningFor(m_folderView->folder()));
     for (PreviewWindow* w : previewWindows())
@@ -1169,7 +1175,7 @@ void MainWindow::backupNode(const VfsNode* node)
     if (!node || !m_session || m_editWatcher->isRunning())
         return;
     const auto target = backupTarget(*node);
-    if (target.empty() || hasBackup(*node))
+    if (target.empty() || hasBackup(*m_session, *node))
         return;
     m_folderView->banner()->setInProgress(true);
     for (PreviewWindow* w : previewWindows())
@@ -1178,7 +1184,7 @@ void MainWindow::backupNode(const VfsNode* node)
     m_progress->setRange(0, 0);
     m_progress->show();
     QApplication::setOverrideCursor(Qt::BusyCursor);
-    m_editWatcher->setFuture(startBackup(target));
+    m_editWatcher->setFuture(startBackup(target, m_session->vfs.backupRoot()));
     updateActions();
 }
 
@@ -1244,12 +1250,13 @@ bool MainWindow::confirmAndReplace(ReplacePlan plan, bool edited, QWidget* dialo
 
     // No automatic backups: if there isn't one, say so and offer to make it.
     const auto target = Vfs::editTarget(*node);
-    const bool backedUp = hasBackup(*node);
+    const auto backup = backupOf(*m_session, *node);
+    const bool backedUp = !backup.empty();
     QMessageBox box(QMessageBox::Question, title, QString(), QMessageBox::Cancel, parent);
     QPushButton* replace = nullptr;
     QPushButton* backupAndReplace = nullptr;
     if (backedUp) {
-        text += tr("<br><br>The original is backed up as %1.").arg(toQString(backupPathFor(target).filename()));
+        text += tr("<br><br>The original is backed up in %1.").arg(backupDisplayName(*m_session, backup).toHtmlEscaped());
         replace = box.addButton(title, QMessageBox::AcceptRole);
     } else {
         box.setIcon(QMessageBox::Warning);
@@ -1286,21 +1293,44 @@ bool MainWindow::confirmAndReplace(ReplacePlan plan, bool edited, QWidget* dialo
 void MainWindow::restoreOriginal()
 {
     const auto nodes = selectedNodes();
-    if (!m_session || !m_editMode || nodes.size() != 1 || !hasBackup(*nodes.front()) || m_editWatcher->isRunning())
+    if (!m_session || !m_editMode || nodes.size() != 1 || !hasBackup(*m_session, *nodes.front())
+        || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
         return;
     const VfsNode* node = nodes.front();
     const auto target = backupTarget(*node);
+    const QString backup = backupDisplayName(*m_session, backupOf(*m_session, *node));
+
+    // One file inside an archive: put back just that file, as it is in the
+    // archive's backup; the archive's other changes stay.
+    if (restoresSingleFile(*node)) {
+        if (QMessageBox::question(this, tr("Restore Original"),
+                                  tr("Put back the original %1, as it is in the backup %2?\n\nOnly this file "
+                                     "changes; other files replaced in %3 keep their changes.")
+                                      .arg(toQString(node->name()), backup, toQString(target.filename())))
+            != QMessageBox::Yes)
+            return;
+        m_pendingSelect = locationOf(node);
+        m_statusLabel->setText(tr("Restoring %1…").arg(toQString(node->name())));
+        m_progress->setRange(0, 0);
+        m_progress->show();
+        QApplication::setOverrideCursor(Qt::BusyCursor);
+        m_editWatcher->setFuture(startRestoreFile(m_session, node));
+        updateActions();
+        return;
+    }
+
     const QString name = toQString(target.filename());
     if (QMessageBox::question(this, tr("Restore Original"),
                               tr("Restore the original %1 from %2?\n\nEvery replacement made in it since the backup "
                                  "will be undone.")
-                                  .arg(name, toQString(backupPathFor(target).filename())))
+                                  .arg(name, backup))
         != QMessageBox::Yes)
         return;
 
     // Close the session first so no open handle blocks overwriting the file;
     // remember what to reopen once the restore finishes.
     m_reopen = {m_session->game, m_session->source, m_session->extraSources()};
+    const std::filesystem::path backupRoot = m_session->vfs.backupRoot();
     const QString reselect = locationOf(node);
     setSession(nullptr);
     m_pendingSelect = reselect;
@@ -1309,7 +1339,7 @@ void MainWindow::restoreOriginal()
     m_progress->setRange(0, 0);
     m_progress->show();
     QApplication::setOverrideCursor(Qt::BusyCursor);
-    m_editWatcher->setFuture(startRestore(target));
+    m_editWatcher->setFuture(startRestore(target, backupRoot));
     updateActions();
 }
 
@@ -1338,6 +1368,12 @@ void MainWindow::onEditFinished()
     }
     if (TextEditorWindow* editor = std::exchange(m_savingEditor, nullptr))
         editor->saveFinished(result.error.isEmpty());
+    if (result.unchanged) { // nothing was written: no reload
+        statusBar()->showMessage(result.summary, 15000);
+        m_pendingSelect.clear();
+        updateActions();
+        return;
+    }
     if (m_reopen) { // a restore closed the session: open it again
         const auto [game, source, extras] = *std::exchange(m_reopen, std::nullopt);
         openSource(game, source, extras, std::exchange(m_pendingSelect, QString()));
@@ -1491,7 +1527,7 @@ void MainWindow::updateActions()
     m_importAction->setEnabled(m_editMode && !busy && single && importKind(*m_session, *single) != ImportKind::None);
     m_editModeAction->setEnabled(!editing);
     m_replaceAction->setEnabled(m_editMode && !busy && single && Vfs::canReplace(*single));
-    m_restoreAction->setEnabled(m_editMode && !busy && single && hasBackup(*single));
+    m_restoreAction->setEnabled(m_editMode && !busy && single && hasBackup(*m_session, *single));
     m_editTextAction->setEnabled(isEditableText(single, /*sniff=*/false));
     m_copyPathAction->setEnabled(!nodes.empty());
     m_revealAction->setEnabled(single && !single->diskPath().empty());

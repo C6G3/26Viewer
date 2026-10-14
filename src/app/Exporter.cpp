@@ -157,7 +157,7 @@ Result<int> exportOne(const Session& session, const ExtractItem& item, const std
 
     // Model → .obj, and the textures stored in it → <name>_textures/*.png
     if (const MeshDecoder* decoder = session.content.findMeshDecoder(ext, *data)) {
-        if (auto mesh = decoder->decode(*data)) {
+        if (auto mesh = decoder->decodeWith(*data, session.vfs.decompileContext(node))) {
             const std::string obj = mesh::toObj(*mesh);
             if (auto ok = writeFile(outputDir / withExtension(relative, ".obj"), asBytes(obj)); !ok)
                 return std::unexpected(ok.error());
@@ -183,7 +183,7 @@ Result<int> exportOne(const Session& session, const ExtractItem& item, const std
 
     // Decompiled → .txt (e.g. Blur's audio entities)
     if (const TextDecompiler* decompiler = session.content.findDecompiler(ext, *data)) {
-        if (auto text = decompiler->decompile(*data)) {
+        if (auto text = decompiler->decompileWith(*data, session.vfs.decompileContext(node))) {
             if (auto ok = writeFile(outputDir / withExtension(relative, ".txt"), asBytes(*text)); !ok)
                 return std::unexpected(ok.error());
             return 1;

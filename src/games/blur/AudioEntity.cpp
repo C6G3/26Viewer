@@ -1,9 +1,12 @@
 #include "AudioEntity.hpp"
 
+#include "viewer/core/TextEdit.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cstring>
 #include <format>
+#include <limits>
 
 namespace viewer::games::blur {
 
@@ -233,7 +236,15 @@ Result<AudioEntity> parseAudioEntity(ByteSpan data)
     return e;
 }
 
-Result<std::string> decompileAudioEntity(ByteSpan data)
+namespace {
+
+/// An editable value of the text: where it is and how it's stored.
+struct AudioSlot {
+    std::size_t offset;
+    char kind; ///< 'f' f32, 'i' i32, 'U' u32, 'u' u16, 'h' u16 or "-" (0xFFFF)
+};
+
+Result<std::string> decompileAudio(ByteSpan data, std::vector<AudioSlot>* slots)
 {
     auto parsed = parseAudioEntity(data);
     if (!parsed)
@@ -252,15 +263,23 @@ Result<std::string> decompileAudioEntity(ByteSpan data)
             return std::format("#{}:{} {}", component, port, e.components[component].name);
         return std::format("#{}:{}", component, port);
     };
+    // Values the user may edit are marked (when asked for) for recompiling.
+    const auto editable = [&](std::string value, std::size_t offset, char kind) {
+        if (!slots)
+            return value;
+        slots->push_back({offset, kind});
+        return EditableText::mark(value, slots->size() - 1);
+    };
     auto number = [](float f) { return std::format("{}", f); };
 
     std::string out;
-    out += std::format("// {} — Blur audio entity, decompiled by 26Viewer (read-only).\n", e.name);
+    out += std::format("// {} — Blur audio entity, decompiled by 26Viewer.\n", e.name);
     out += "// Components are numbered #0, #1…; \"#14:2 Name\" is output 2 of component #14.\n";
     out += "// A parameter is a constant (= value) or fed by a link (<- #n:port, default value).\n";
-    out += "// Field names aren't stored in the game; they're numbered by kind.\n\n";
+    out += "// Field names aren't stored in the game; they're numbered by kind.\n";
+    out += "// Numbers can be edited (Edit, then Save); links, names and list sizes can't.\n\n";
     out += std::format("entity \"{}\"\n", e.name);
-    out += std::format("update_rate {}\n", e.updateRate);
+    out += std::format("update_rate {}\n", editable(std::to_string(e.updateRate), 0x14, 'U'));
     out += std::format("components {}\n", e.components.size());
 
     for (std::size_t i = 0; i < e.components.size(); ++i) {
@@ -289,10 +308,10 @@ Result<std::string> decompileAudioEntity(ByteSpan data)
                     const std::uint16_t from = u16(data, pos);
                     const float value = loadScalar<float>(data, pos + 4);
                     if (from == 0xffff)
-                        out += std::format("{}param {:<3} = {}\n", indent, ++n.param, number(value));
+                        out += std::format("{}param {:<3} = {}\n", indent, ++n.param, editable(number(value), pos + 4, 'f'));
                     else
                         out += std::format("{}param {:<3} <- {} (default {})\n", indent, ++n.param,
-                                           link(from, u16(data, pos + 2)), number(value));
+                                           link(from, u16(data, pos + 2)), editable(number(value), pos + 4, 'f'));
                     break;
                 }
                 case 'K': {
@@ -304,19 +323,21 @@ Result<std::string> decompileAudioEntity(ByteSpan data)
                     break;
                 }
                 case 'f':
-                    out += std::format("{}value {:<3} {}\n", indent, ++n.value, number(loadScalar<float>(data, pos)));
+                    out += std::format("{}value {:<3} {}\n", indent, ++n.value,
+                                       editable(number(loadScalar<float>(data, pos)), pos, 'f'));
                     break;
                 case 'i':
-                    out += std::format("{}int {:<5} {}\n", indent, ++n.integer, static_cast<std::int32_t>(u32(data, pos)));
+                    out += std::format("{}int {:<5} {}\n", indent, ++n.integer,
+                                       editable(std::to_string(static_cast<std::int32_t>(u32(data, pos))), pos, 'i'));
                     break;
                 case 'h': {
                     auto half = [](std::uint16_t v) { return v == 0xffff ? std::string("-") : std::to_string(v); };
-                    out += std::format("{}pair {:<4} {}, {}\n", indent, ++n.pair, half(u16(data, pos)),
-                                       half(u16(data, pos + 2)));
+                    out += std::format("{}pair {:<4} {}, {}\n", indent, ++n.pair, editable(half(u16(data, pos)), pos, 'h'),
+                                       editable(half(u16(data, pos + 2)), pos + 2, 'h'));
                     break;
                 }
                 case 'u':
-                    out += std::format("{}{}\n", indent, u16(data, pos));
+                    out += std::format("{}{}\n", indent, editable(std::to_string(u16(data, pos)), pos, 'u'));
                     break;
                 case 'b':
                     out += std::format("{}bank      {}\n", indent, text(u32(data, pos)));
@@ -348,7 +369,7 @@ Result<std::string> decompileAudioEntity(ByteSpan data)
             out += std::format("    {} {}\n", list.label, count);
             for (std::uint16_t k = 0; k < count; ++k) {
                 if (layoutBytes(list.item) == 2 && list.itemSize == 2) {
-                    out += std::format("      [{}] {}\n", k, u16(data, listPos));
+                    out += std::format("      [{}] {}\n", k, editable(std::to_string(u16(data, listPos)), listPos, 'u'));
                 } else {
                     out += std::format("      [{}]\n", k);
                     Counters itemCounters;
@@ -361,9 +382,71 @@ Result<std::string> decompileAudioEntity(ByteSpan data)
     return out;
 }
 
+} // namespace
+
+Result<std::string> decompileAudioEntity(ByteSpan data)
+{
+    return decompileAudio(data, nullptr);
+}
+
 bool AudioEntityDecompiler::canDecompile(std::string_view, ByteSpan data) const
 {
     return isAudioEntity(data);
+}
+
+Result<ByteBuffer> AudioEntityDecompiler::recompile(ByteSpan original, std::string_view text, const DecompileContext&) const
+{
+    std::vector<AudioSlot> slots;
+    auto marked = decompileAudio(original, &slots);
+    if (!marked)
+        return std::unexpected(marked.error());
+    std::vector<std::size_t> ids;
+    const EditableText before = EditableText::finish(*marked, &ids);
+    auto changes = changedValues(before, text);
+    if (!changes)
+        return std::unexpected(changes.error());
+    ByteBuffer out(original.begin(), original.end());
+    for (const ChangedValue& c : *changes) {
+        const AudioSlot& slot = slots[ids[c.index]];
+        const auto bad = [&](std::string_view why) {
+            return fail(ErrorCode::InvalidFormat, "line {}: \"{}\" {}", c.line, c.text, why);
+        };
+        switch (slot.kind) {
+        case 'f': {
+            const auto v = parseReal(c.text);
+            if (!v)
+                return bad("isn't a number (use a dot for decimals: 0.5)");
+            storeScalar(out, slot.offset, static_cast<float>(*v));
+            break;
+        }
+        case 'i': {
+            const auto v = parseInteger(c.text);
+            if (!v || *v < std::numeric_limits<std::int32_t>::min() || *v > std::numeric_limits<std::int32_t>::max())
+                return bad("isn't a whole number");
+            storeScalar(out, slot.offset, static_cast<std::int32_t>(*v));
+            break;
+        }
+        case 'U': {
+            const auto v = parseUnsigned(c.text);
+            if (!v || *v > 0xFFFFFFFFull)
+                return bad("isn't a whole number from 0 up");
+            storeScalar(out, slot.offset, static_cast<std::uint32_t>(*v));
+            break;
+        }
+        default: { // u16, or "-" for none
+            if (slot.kind == 'h' && c.text == "-") {
+                storeScalar(out, slot.offset, std::uint16_t{0xFFFF});
+                break;
+            }
+            const auto v = parseUnsigned(c.text);
+            if (!v || *v > (slot.kind == 'h' ? 65534u : 65535u))
+                return bad(slot.kind == 'h' ? "isn't a whole number from 0 to 65534, or -" : "isn't a whole number from 0 to 65535");
+            storeScalar(out, slot.offset, static_cast<std::uint16_t>(*v));
+            break;
+        }
+        }
+    }
+    return out;
 }
 
 bool AudioEntityStructureParser::canParse(std::string_view, ByteSpan data) const

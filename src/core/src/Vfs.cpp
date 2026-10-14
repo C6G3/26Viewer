@@ -135,6 +135,8 @@ MountReport Vfs::mountDirectory(const fs::path& directory, const ContentRegistry
                                 const MountOptions& options)
 {
     MountReport report;
+    if (m_backupRoot.empty())
+        m_backupRoot = directory;
     std::error_code ec;
     fs::recursive_directory_iterator it(directory, fs::directory_options::skip_permission_denied, ec);
     if (ec) {
@@ -150,7 +152,8 @@ MountReport Vfs::mountDirectory(const fs::path& directory, const ContentRegistry
         const auto& entry = *it;
         if (entry.is_directory(ec)) {
             const auto name = toLower(u8(entry.path().filename()));
-            if (std::ranges::contains(options.ignoredDirectories, name))
+            // The originals kept in "<game>/backup" aren't part of the game.
+            if (std::ranges::contains(options.ignoredDirectories, name) || (it.depth() == 0 && name == kBackupFolder))
                 it.disable_recursion_pending();
             continue;
         }
@@ -204,6 +207,8 @@ Result<const VfsNode*> Vfs::mountArchive(const fs::path& file, const ContentRegi
     auto archive = format->open(file);
     if (!archive)
         return std::unexpected(archive.error());
+    if (m_backupRoot.empty())
+        m_backupRoot = file.parent_path();
 
     std::error_code ec;
     VfsNode* node = addChild(*m_root, u8(file.filename()), VfsNode::Kind::Archive);
@@ -215,6 +220,31 @@ Result<const VfsNode*> Vfs::mountArchive(const fs::path& file, const ContentRegi
     return node;
 }
 
+Result<ByteBuffer> Vfs::readBackup(const VfsNode& node, const ContentRegistry& content) const
+{
+    if (!node.isFile())
+        return fail(ErrorCode::InvalidFormat, "'{}' is not a file", node.name());
+    const fs::path target = editTarget(node);
+    const fs::path backup = findBackup(target, m_backupRoot);
+    if (backup.empty())
+        return fail(ErrorCode::NotFound, "'{}' has no backup", u8(target.filename()));
+    if (!node.archive())
+        return readFile(backup);
+    // The backup is a copy of the archive: open it the way the archive itself opens.
+    const ArchiveFormat* format = content.findArchiveFormat(target);
+    if (!format)
+        return fail(ErrorCode::Unsupported, "can't open the backup of '{}'", u8(target.filename()));
+    auto original = format->open(backup);
+    if (!original)
+        return std::unexpected(original.error());
+    const std::string wanted = toLower(node.archive()->entries()[node.entryIndex()].path);
+    const auto entries = (*original)->entries();
+    const auto it = std::ranges::find_if(entries, [&](const ArchiveEntry& e) { return toLower(e.path) == wanted; });
+    if (it == entries.end())
+        return fail(ErrorCode::NotFound, "'{}' isn't in the backup of '{}'", node.name(), u8(target.filename()));
+    return (*original)->read(static_cast<std::size_t>(it - entries.begin()));
+}
+
 Result<ByteBuffer> Vfs::read(const VfsNode& node, std::uint64_t limit) const
 {
     if (!node.isFile())
@@ -222,6 +252,43 @@ Result<ByteBuffer> Vfs::read(const VfsNode& node, std::uint64_t limit) const
     if (node.archive())
         return node.archive()->read(node.entryIndex());
     return readFile(node.diskPath(), limit);
+}
+
+DecompileContext Vfs::decompileContext(const VfsNode& node) const
+{
+    const VfsNode* base = &node;
+    while (base->parent() && base->kind() != VfsNode::Kind::Archive)
+        base = base->parent();
+    DecompileContext context;
+    context.readFolder = [this, base](std::string_view folder) {
+        std::vector<DecompileContext::File> files;
+        const VfsNode* current = base;
+        for (const auto part : std::views::split(folder, '/')) {
+            const std::string_view name(part.begin(), part.end());
+            if (name.empty())
+                continue;
+            const auto it = current->m_lookup.find(toLower(name));
+            if (it == current->m_lookup.end())
+                return files;
+            current = it->second;
+        }
+        for (const auto& child : current->children())
+            if (child->isFile())
+                if (auto data = read(*child))
+                    files.push_back({child->name(), std::move(*data)});
+        return files;
+    };
+    context.readSibling = [this, file = &node](std::string_view name) -> std::optional<ByteBuffer> {
+        const VfsNode* folder = file->parent();
+        if (!folder)
+            return std::nullopt;
+        const auto it = folder->m_lookup.find(toLower(name));
+        if (it == folder->m_lookup.end() || !it->second->isFile())
+            return std::nullopt;
+        auto data = read(*it->second);
+        return data ? std::optional<ByteBuffer>(std::move(*data)) : std::nullopt;
+    };
+    return context;
 }
 
 Result<std::shared_ptr<const ByteSource>> Vfs::source(const VfsNode& node)
@@ -284,11 +351,8 @@ Result<ReplaceReport> Vfs::replace(const VfsNode& node, ByteSpan data) const
     } else {
         return std::unexpected(written.error());
     }
-    if (report) {
-        std::error_code ec;
-        if (const auto backup = backupPathFor(editTarget(node)); std::filesystem::exists(backup, ec))
-            report->backup = backup;
-    }
+    if (report)
+        report->backup = findBackup(editTarget(node), m_backupRoot);
     return report;
 }
 

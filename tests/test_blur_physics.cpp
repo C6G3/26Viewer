@@ -14,6 +14,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdlib>
 #include <format>
@@ -132,14 +133,15 @@ TEST_CASE("Blur physics: boxes, bodies with hulls, placed mesh copies")
     s.base(0x20, 2);
     s.f3(1, 2, 3);
     s.placement(10, 0, 0);
-    // A car part: a body (tag 0xC0000006) at z = 7 holding a hull placed at y = 5,
-    // its points stored around its centre of mass (1, 0, 0).
+    // A car part: a body (tag 0xC0000006, centre of mass (1, 0, 0)) at z = 7
+    // holding a hull placed at y = 5, its points stored around the body's centre
+    // of mass (the hull's own offset doesn't move it).
     s.put<std::uint32_t>(7);
-    s.base(0xC0000006);
+    s.base(0xC0000006, 0, 1, 0, 0);
     s.put<std::uint32_t>(1); // shapes
     s.put<std::uint32_t>(0xE0000000);
     s.put<std::uint32_t>(3);
-    s.base(0xE0000000, 15, 1, 0, 0);
+    s.base(0xE0000000, 15, 0.3f, 0, 0);
     s.put<std::uint32_t>(4);
     s.put<std::uint32_t>(4);
     s.f3(0, 0, 0);
@@ -180,7 +182,7 @@ TEST_CASE("Blur physics: boxes, bodies with hulls, placed mesh copies")
     REQUIRE(hull);
     CHECK(hull->owner == 0xC0000006);
     CHECK(hull->material == 15);
-    CHECK(hull->positions[0] == Approx(1.0f)); // (0,0,0) + centre (1,0,0) + shape (0,5,0) + body (0,0,7)
+    CHECK(hull->positions[0] == Approx(1.0f)); // (0,0,0) + body's centre (1,0,0) + shape (0,5,0) + body (0,0,7)
     CHECK(hull->positions[1] == Approx(5.0f));
     CHECK(hull->positions[2] == Approx(7.0f));
     CHECK(hull->indices.size() == 12);
@@ -304,6 +306,41 @@ TEST_CASE("Real Blur collision (set BLUR_DIR to enable)")
         hi = std::max(hi, car->positions[3 * car->indices[i]]);
     }
     CHECK((lo + hi) / 2 == Approx(-0.774f).margin(0.01f));
+
+    // Hinged panels' hulls sit on their panels (stored around their body's centre
+    // of mass): the ratrod beetle's bonnet, door and wing, and the Defender's
+    // boot, whose hull is turned inside its body.
+    const auto centreOf = [](const Mesh& mesh, std::string_view name, bool collisionPart) {
+        std::array<float, 3> lo3{1e9f, 1e9f, 1e9f}, hi3{-1e9f, -1e9f, -1e9f};
+        for (const Mesh::Part& p : mesh.parts) {
+            if (p.collision != collisionPart || p.lods.empty() || p.node < 0
+                || mesh.nodes[static_cast<std::size_t>(p.node)].name != name)
+                continue;
+            for (std::uint32_t i = p.lods[0].firstIndex; i < p.lods[0].firstIndex + p.lods[0].indexCount; ++i)
+                for (std::size_t k = 0; k < 3; ++k) {
+                    lo3[k] = std::min(lo3[k], mesh.positions[3 * mesh.indices[i] + k]);
+                    hi3[k] = std::max(hi3[k], mesh.positions[3 * mesh.indices[i] + k]);
+                }
+        }
+        return std::array<float, 3>{(lo3[0] + hi3[0]) / 2, (lo3[1] + hi3[1]) / 2, (lo3[2] + hi3[2]) / 2};
+    };
+    const auto load = [&](std::string_view suffix) {
+        const auto it = std::ranges::find_if(entries, [&](const auto& e) { return e.path.ends_with(suffix); });
+        REQUIRE(it != entries.end());
+        auto mesh = ModelDecoder().decode((*pak)->read(static_cast<std::size_t>(it - entries.begin())).value());
+        REQUIRE(mesh);
+        return std::move(*mesh);
+    };
+    const Mesh beetle = load("models/vehicles/volkswagen_beetle_rat.model");
+    const Mesh defender = load("models/vehicles/landrover_defendersvx_stock.model");
+    const std::pair<const Mesh*, const char*> panels[] = {
+        {&beetle, "e_bonnet"}, {&beetle, "e_door_left"}, {&beetle, "e_wing_frontright"}, {&defender, "e_boot"}};
+    for (const auto& [mesh, name] : panels) {
+        INFO(name);
+        const auto hull = centreOf(*mesh, name, true), panel = centreOf(*mesh, name, false);
+        for (std::size_t k = 0; k < 3; ++k)
+            CHECK(hull[k] == Approx(panel[k]).margin(0.12f));
+    }
 
     // Every model's collision reads to the end.
     std::size_t streams = 0;

@@ -70,8 +70,10 @@ Usage:
   26viewer-cli extract <archive|game dir> <out> [filter]
                                                   Extract files, keeping folder structure
   26viewer-cli replace <archive> <entry path> <new file>
-                                                  Replace one file inside an archive (keeps its name)
-  26viewer-cli backup  <file>                     Save the original as <file>.bak (once; never overwritten)
+                                                  Replace one file inside an archive (keeps its name);
+                                                  a .txt from `decompile` (edited) is compiled back first
+  26viewer-cli backup  <file>                     Save the original in the game's backup folder
+                                                  (<game>/backup/...; once, never overwritten)
   26viewer-cli media   <archive|game dir> [filter] [out]
                                                   Decode every audio bank and model (sanity check);
                                                   with <out>, also write sounds as .wav and models as .obj
@@ -87,6 +89,20 @@ struct Session {
     Vfs vfs;
     const Game* game = nullptr;
 };
+
+/// The install folder of the game `file` belongs to (the nearest folder above
+/// it that a game recognises), or empty: where its backup folder goes.
+fs::path gameFolderOf(const GameRegistry& games, const fs::path& file)
+{
+    std::error_code ec;
+    for (fs::path dir = fs::absolute(file, ec).parent_path(); !dir.empty(); dir = dir.parent_path()) {
+        if (games.detect(dir))
+            return dir;
+        if (dir == dir.parent_path())
+            break;
+    }
+    return {};
+}
 
 /// Loads every game's handlers (the CLI doesn't know which game a lone
 /// archive belongs to) and mounts the target.
@@ -114,6 +130,8 @@ Result<const VfsNode*> mount(Session& s, const fs::path& target)
     }
     for (const auto& g : s.games.games())
         g->registerContent(s.content);
+    if (const fs::path game = gameFolderOf(s.games, target); !game.empty())
+        s.vfs.setBackupRoot(game); // an archive of a game install: backups go in the game's backup folder
     return s.vfs.mountArchive(target, s.content);
 }
 
@@ -244,7 +262,9 @@ int cmdReplace(const fs::path& archive, const std::string& entryPath, const fs::
         std::println(stderr, "error: '{}' not found in the archive", entryPath);
         return 1;
     }
-    if (extensionOf(target->name()) != extensionOf(newFile)) {
+    // A .txt for a file shown decompiled (game tables…): compile its values back.
+    const bool compile = extensionOf(newFile) == "txt" && extensionOf(target->name()) != "txt";
+    if (!compile && extensionOf(target->name()) != extensionOf(newFile)) {
         std::println(stderr, "error: file types differ (.{} vs .{})", extensionOf(target->name()), extensionOf(newFile));
         return 1;
     }
@@ -252,6 +272,29 @@ int cmdReplace(const fs::path& archive, const std::string& entryPath, const fs::
     if (!data) {
         std::println(stderr, "error: {}", data.error().message);
         return 1;
+    }
+    if (compile) {
+        auto original = s.vfs.read(*target);
+        if (!original) {
+            std::println(stderr, "error: {}", original.error().message);
+            return 1;
+        }
+        const TextDecompiler* decompiler = s.content.findDecompiler(extensionOf(target->name()), *original);
+        if (!decompiler || !decompiler->canRecompile()) {
+            std::println(stderr, "error: '{}' can't be made from text", target->name());
+            return 1;
+        }
+        const std::string text(reinterpret_cast<const char*>(data->data()), data->size());
+        auto compiled = decompiler->recompile(*original, text, s.vfs.decompileContext(*target));
+        if (!compiled) {
+            std::println(stderr, "error: {}: {}", toUtf8(newFile), compiled.error().message);
+            return 1;
+        }
+        if (*compiled == *original) {
+            std::println("no values changed; {} left as it is", target->virtualPath());
+            return 0;
+        }
+        data = std::move(*compiled);
     }
     auto report = s.vfs.replace(*target, *data);
     if (!report) {
@@ -271,9 +314,11 @@ int cmdReplace(const fs::path& archive, const std::string& entryPath, const fs::
 
 int cmdBackup(const fs::path& file)
 {
-    std::error_code ec;
-    const bool existed = fs::exists(backupPathFor(file), ec);
-    auto backup = ensureBackup(file);
+    GameRegistry games;
+    registerBuiltinGames(games);
+    const fs::path root = gameFolderOf(games, file);
+    const bool existed = !findBackup(file, root).empty();
+    auto backup = ensureBackup(file, root);
     if (!backup) {
         std::println(stderr, "error: {}", backup.error().message);
         return 1;
@@ -303,7 +348,7 @@ int cmdDecompile(const fs::path& target, const std::string& filter, const fs::pa
         const TextDecompiler* decompiler = s.content.findDecompiler(extensionOf(node->name()), *data);
         if (!decompiler)
             continue;
-        auto text = decompiler->decompile(*data);
+        auto text = decompiler->decompileWith(*data, s.vfs.decompileContext(*node));
         if (!text) {
             ++failures;
             std::println(stderr, "FAIL {}: {}", node->virtualPath(), text.error().message);
@@ -382,7 +427,8 @@ int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& 
             }
         } else if (const MeshDecoder* decoder = s.content.findMeshDecoder(ext, *header)) {
             auto data = s.vfs.read(*node);
-            auto mesh = data ? decoder->decode(*data) : Result<Mesh>(std::unexpected(data.error()));
+            auto mesh = data ? decoder->decodeWith(*data, s.vfs.decompileContext(*node))
+                             : Result<Mesh>(std::unexpected(data.error()));
             if (!mesh) {
                 report(mesh.error().message);
                 continue;

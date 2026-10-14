@@ -89,6 +89,7 @@ private:
     QAction* m_replaceAction;
     QAction* m_exportAction;
     QAction* m_importAction;
+    QAction* m_texturesAction; ///< Shown for files holding textures (UI packs, models).
     std::function<bool(const VfsNode*)> m_importCheck;
 };
 

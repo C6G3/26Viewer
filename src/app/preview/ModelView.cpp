@@ -7,6 +7,7 @@
 #include <QColorDialog>
 #include <QFileInfo>
 #include <QComboBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -58,8 +59,10 @@ constexpr const char* kFragmentShader = R"(
 uniform vec3 color;
 uniform float lit;
 uniform float alpha;
-uniform float specular; // highlight strength (glossy paint, chrome, glass)
-uniform float rim;      // brightening towards the edges (reflections on paint)
+uniform float specular;  // highlight strength (glossy paint, chrome, glass)
+uniform float shininess; // how tight the highlights are
+uniform float rim;       // how much of the sky the surface reflects (paint, chrome, glass)
+uniform vec3 up;         // the world's up, in view space (sky above, ground below)
 uniform sampler2D tex;
 uniform float textured;  // 1: colour from the part's texture
 uniform float alphaTest; // texture alpha below this is cut out
@@ -71,9 +74,24 @@ void main() {
     if (t.a < alphaTest)
         discard;
     vec3 base = color * t.rgb;
-    // Headlight: light comes from the camera; both faces lit (models are often single-sided).
-    float d = abs(normalize(vNormal).z);
-    vec3 shaded = base * (0.28 + 0.72 * d) + vec3(specular * pow(d, 48.0)) + vec3(rim * 0.6 * pow(1.0 - d, 3.0));
+    // A studio around the model, like the game's lighting: a key light from the
+    // upper front, a soft fill from the other side, light from the sky above and
+    // the ground below, highlights, and the sky reflected at grazing angles.
+    // Both faces are lit (models are often single-sided).
+    vec3 n = normalize(vNormal);
+    if (n.z < 0.0)
+        n = -n;
+    vec3 v = vec3(0.0, 0.0, 1.0);
+    vec3 key = normalize(vec3(-0.45, 0.65, 0.62));
+    vec3 fill = normalize(vec3(0.7, 0.05, 0.7));
+    float sky = dot(n, up) * 0.5 + 0.5;
+    vec3 ambient = mix(vec3(0.20, 0.19, 0.18), vec3(0.42, 0.45, 0.50), sky);
+    vec3 diffuse = base * (ambient + vec3(0.78) * max(dot(n, key), 0.0) + vec3(0.22) * max(dot(n, fill), 0.0));
+    float highlight = pow(max(dot(n, normalize(key + v)), 0.0), shininess) + 0.35 * pow(max(dot(n, normalize(fill + v)), 0.0), shininess);
+    float fresnel = 0.04 + 0.96 * pow(1.0 - n.z, 5.0);
+    vec3 r = reflect(-v, n);
+    vec3 reflected = mix(vec3(0.16, 0.15, 0.14), vec3(0.75, 0.80, 0.88), smoothstep(-0.25, 0.35, dot(r, up)));
+    vec3 shaded = diffuse + vec3(specular * highlight) + reflected * rim * fresnel;
     gl_FragColor = vec4(mix(base, shaded, lit), alpha * mix(1.0, t.a, texAlpha));
 }
 )";
@@ -86,6 +104,7 @@ struct Look {
     float alpha = 1.0f;
     float lit = 1.0f; ///< 1: shaded by the light; lower: glows (lights)
     bool known = false;
+    float shininess = 24.0f; ///< Tight (chrome, glass) to broad (rubber) highlights.
 };
 
 Look lookFor(const std::string& shader, const QVector3D& paint)
@@ -94,20 +113,20 @@ Look lookFor(const std::string& shader, const QVector3D& paint)
     for (char& c : s)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     const auto has = [&](const char* what) { return s.find(what) != std::string::npos; };
-    if (has("_paint"))
-        return {paint, 0.55f, 0.6f, 1.0f, 1.0f, true};
+    if (has("_paint")) // glossy clear coat over the colour
+        return {paint, 0.6f, 0.55f, 1.0f, 1.0f, true, 90.0f};
     if (has("_glass"))
-        return {QVector3D(0.10f, 0.13f, 0.16f), 0.9f, 0.4f, 0.45f, 1.0f, true};
+        return {QVector3D(0.10f, 0.13f, 0.16f), 1.0f, 0.9f, 0.45f, 1.0f, true, 160.0f};
     if (has("_light"))
-        return {QVector3D(1.0f, 0.96f, 0.88f), 0.3f, 0.0f, 1.0f, 0.35f, true};
+        return {QVector3D(1.0f, 0.96f, 0.88f), 0.3f, 0.2f, 1.0f, 0.35f, true, 60.0f};
     if (has("_neon"))
-        return {QVector3D(0.85f, 0.9f, 1.0f), 0.2f, 0.0f, 1.0f, 0.3f, true};
+        return {QVector3D(0.85f, 0.9f, 1.0f), 0.2f, 0.0f, 1.0f, 0.3f, true, 20.0f};
     if (has("_alloy") || has("_chrome"))
-        return {QVector3D(0.78f, 0.79f, 0.81f), 0.8f, 0.5f, 1.0f, 1.0f, true};
-    if (has("_matt"))
-        return {QVector3D(0.16f, 0.16f, 0.17f), 0.05f, 0.0f, 1.0f, 1.0f, true};
+        return {QVector3D(0.62f, 0.63f, 0.66f), 0.9f, 0.85f, 1.0f, 1.0f, true, 120.0f};
+    if (has("_matt")) // rubber, plastic trim
+        return {QVector3D(0.16f, 0.16f, 0.17f), 0.06f, 0.05f, 1.0f, 1.0f, true, 8.0f};
     if (has("veh_default"))
-        return {QVector3D(0.30f, 0.31f, 0.33f), 0.15f, 0.0f, 1.0f, 1.0f, true};
+        return {QVector3D(0.30f, 0.31f, 0.33f), 0.15f, 0.12f, 1.0f, 1.0f, true, 30.0f};
     return {};
 }
 
@@ -584,7 +603,9 @@ void ModelCanvas::paintGL()
     m_program.setUniformValue("normalMatrix", view.normalMatrix());
     m_program.setUniformValue("alpha", 1.0f);
     m_program.setUniformValue("specular", 0.0f);
+    m_program.setUniformValue("shininess", 24.0f);
     m_program.setUniformValue("rim", 0.0f);
+    m_program.setUniformValue("up", view.mapVector(QVector3D(0, 1, 0)).normalized());
     m_program.setUniformValue("tex", 0);
     m_program.setUniformValue("textured", 0.0f);
     m_program.setUniformValue("alphaTest", 0.0f);
@@ -676,6 +697,7 @@ void ModelCanvas::paintGL()
             m_program.setUniformValue("texAlpha", use == AlphaUse::Blend ? 1.0f : 0.0f);
             m_program.setUniformValue("lit", look.lit);
             m_program.setUniformValue("specular", look.specular);
+            m_program.setUniformValue("shininess", look.shininess);
             m_program.setUniformValue("rim", look.rim);
             m_program.setUniformValue("alpha", look.alpha);
             m_program.setUniformValue("color", m_highlighted[p] ? c * 0.35f + accent * 0.65f : c);
@@ -698,7 +720,8 @@ void ModelCanvas::paintGL()
                 }
                 glDepthMask(GL_FALSE);
             }
-            drawTriangles(*lodRange(p));
+            if (const Mesh::Range* r = lodRange(p))
+                drawTriangles(*r);
             m_program.setUniformValue("texAlpha", 0.0f);
             if (glow)
                 glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
@@ -821,7 +844,7 @@ ModelView::ModelView(QWidget* parent)
       m_wireframe(new QCheckBox(tr("Wireframe"), this)), m_grid(new QCheckBox(tr("Grid"), this)),
       m_shadow(new QCheckBox(tr("Shadow"), this)), m_collision(new QCheckBox(tr("Collision"), this)),
       m_materials(new QCheckBox(tr("Materials"), this)),
-      m_paint(new QToolButton(this)), m_textures(new QToolButton(this)), m_lod(new QComboBox(this)),
+      m_paint(new QToolButton(this)), m_lod(new QComboBox(this)),
       m_animationBar(new QWidget(this)), m_skeletonLabel(new QLabel(this)), m_chooseAnimation(new QToolButton(this)),
       m_stepBack(new QToolButton(this)), m_playBack(new QToolButton(this)), m_pause(new QToolButton(this)),
       m_playForward(new QToolButton(this)), m_stepForward(new QToolButton(this)), m_speed(new QComboBox(this)),
@@ -917,22 +940,31 @@ ModelView::ModelView(QWidget* parent)
     });
     connect(m_parts, &QTreeWidget::customContextMenuRequested, this, &ModelView::showPartsMenu);
 
-    // The textures stored in the model open in their own window.
-    m_textures->setText(tr("Textures"));
-    m_textures->setIcon(icons::textures());
-    m_textures->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_textures->setAutoRaise(true);
-    m_textures->setToolTip(tr("The textures stored in this model: view, export, extract or replace them"));
-    m_textures->setVisible(false);
-    connect(m_textures, &QToolButton::clicked, this, &ModelView::texturesRequested);
+    // Display options: a column in the top right corner of the 3D view, under the
+    // LOD picker. No background, so the model stays visible behind it.
+    auto* options = new QWidget(this);
+    auto* optionsColumn = new QVBoxLayout(options);
+    optionsColumn->setContentsMargins(8, 6, 8, 6);
+    optionsColumn->setSpacing(2);
+    for (QCheckBox* box : {m_solid, m_wireframe, m_grid, m_shadow, m_collision})
+        optionsColumn->addWidget(box);
+    auto* materialsRow = new QHBoxLayout;
+    materialsRow->setSpacing(2);
+    materialsRow->addWidget(m_materials);
+    materialsRow->addWidget(m_paint);
+    materialsRow->addStretch(1);
+    optionsColumn->addLayout(materialsRow);
 
     // The 3D view with the animation controls under it (the parts list keeps its full height).
     auto* viewArea = new QWidget(this);
-    auto* viewLayout = new QVBoxLayout(viewArea);
+    auto* viewLayout = new QGridLayout(viewArea);
     viewLayout->setContentsMargins(0, 0, 0, 0);
     viewLayout->setSpacing(0);
-    viewLayout->addWidget(m_canvas, 1);
-    viewLayout->addWidget(m_animationBar);
+    viewLayout->addWidget(m_canvas, 0, 0);
+    viewLayout->addWidget(options, 0, 0, Qt::AlignTop | Qt::AlignRight);
+    viewLayout->addWidget(m_animationBar, 1, 0);
+    viewLayout->setRowStretch(0, 1);
+    options->raise();
     m_splitter->addWidget(m_parts);
     m_splitter->addWidget(viewArea);
     m_splitter->setStretchFactor(0, 0);
@@ -946,16 +978,6 @@ ModelView::ModelView(QWidget* parent)
     auto* bar = new QHBoxLayout;
     bar->setContentsMargins(8, 4, 8, 4);
     bar->addWidget(m_info, 1);
-    bar->addWidget(m_textures);
-    bar->addSpacing(8);
-    bar->addWidget(m_solid);
-    bar->addWidget(m_wireframe);
-    bar->addWidget(m_grid);
-    bar->addWidget(m_shadow);
-    bar->addWidget(m_collision);
-    bar->addWidget(m_materials);
-    bar->addWidget(m_paint);
-    bar->addSpacing(8);
     bar->addWidget(m_lod);
     bar->addWidget(reset);
 
@@ -1194,7 +1216,6 @@ void ModelView::setMesh(std::shared_ptr<const Mesh> mesh)
                          });
     m_materials->setVisible(effects);
     m_paint->setVisible(effects);
-    m_textures->setVisible(m_mesh && !m_mesh->textures.empty());
     buildTree();
     applyVisibility();
     updateCounts();

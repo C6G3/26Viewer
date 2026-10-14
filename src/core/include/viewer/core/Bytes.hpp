@@ -22,6 +22,20 @@ inline ByteSpan asBytes(std::string_view s) noexcept
     return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
 }
 
+/// Writes a little-endian scalar at `offset`. Caller guarantees bounds.
+template <typename T>
+    requires std::is_arithmetic_v<T>
+void storeScalar(std::span<std::byte> data, std::size_t offset, T value) noexcept
+{
+    if constexpr (std::endian::native != std::endian::little && sizeof(T) > 1) {
+        using U = std::conditional_t<sizeof(T) == 2, std::uint16_t, std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>>;
+        const U swapped = std::byteswap(std::bit_cast<U>(value));
+        std::memcpy(data.data() + offset, &swapped, sizeof(T));
+    } else {
+        std::memcpy(data.data() + offset, &value, sizeof(T));
+    }
+}
+
 /// Reads a little- or big-endian scalar at `offset`. Caller guarantees bounds.
 template <typename T>
     requires std::is_arithmetic_v<T>

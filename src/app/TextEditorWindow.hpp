@@ -8,6 +8,10 @@
 
 #include <memory>
 
+namespace viewer {
+class TextDecompiler;
+}
+
 class QAction;
 class QComboBox;
 class QLabel;
@@ -19,6 +23,10 @@ class TextView;
 /// Edits one text file (opened with "Edit" from a preview or the right-click
 /// menu). Saving hands the encoded bytes to the main window, which writes them
 /// back into the game through the usual Edit Mode / backup / replace flow.
+///
+/// Binary files a decompiler can compile back (Blur's data tables, text
+/// tables…) are edited as their decompiled text: saving turns the edited
+/// values back into the file.
 ///
 /// Like PreviewWindow it remembers its file's location, so after the session
 /// reloads (e.g. after saving) it is pointed at the new node; the text being
@@ -58,14 +66,19 @@ private:
     void updateActions();
     void updatePosition();
 
+    /// Jumps to the line an error message names ("line 12: …").
+    void showErrorLine(const QString& message);
+
     std::shared_ptr<Session> m_session;
     const VfsNode* m_node = nullptr;
+    const TextDecompiler* m_decompiler = nullptr; ///< Set when editing a decompiled binary file.
     QString m_location;
     QString m_name;
     bool m_saving = false;
     bool m_closeAfterSave = false;
 
     TextView* m_view;
+    QLabel* m_hint; ///< What can be changed, when editing decompiled text.
     QAction* m_saveAction;
     QAction* m_saveCopyAction;
     QAction* m_undoAction;
