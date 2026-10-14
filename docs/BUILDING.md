@@ -56,6 +56,25 @@ cmake --install build/release
 `windeployqt6` and copies every MinGW/MSYS2 DLL the binaries need (resolved
 with `file(GET_RUNTIME_DEPENDENCIES)`). Zip that folder to ship it.
 
+## Making a release
+
+GitHub builds releases (`.github/workflows/build.yml`):
+
+1. Set the new version in `CMakeLists.txt` (`project(26Viewer VERSION 0.3.0 …)`), commit and push.
+2. Tag that commit and push the tag:
+
+   ```bash
+   git tag v0.3.0
+   git push origin v0.3.0
+   ```
+
+3. The workflow builds, runs the tests, packages `dist/`, checks that the tag
+   matches the version, and publishes **26Viewer v0.3.0** on the repository's
+   Releases page with `26Viewer-v0.3.0-windows-x64.zip` and notes listing the
+   changes since the previous release. If anything fails, nothing is published:
+   fix it, delete the tag (`git push --delete origin v0.3.0`, `git tag -d v0.3.0`)
+   and tag again.
+
 ## UI screenshots from the command line
 
 ```bash

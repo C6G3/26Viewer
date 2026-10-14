@@ -65,9 +65,14 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    4 MB or more (levels) alone so memory stays bounded (boot.pak export 42 s → 23 s); output identical
 10. [x] Settings dialog (Edit ▸ Settings, `Ctrl+,`): theme, reopen at start-up, the folder save dialogs start
     in, files extracted / exported at once, preview size limits
-11. [ ] Release workflow: tag → CI builds `dist/release` → zip attached to a GitHub Release
+11. [x] Release workflow: tag `vX.Y.Z` → CI checks it matches the version, builds, tests, packages `dist/` → zip
+    attached to a GitHub Release with generated notes (docs/BUILDING.md, "Making a release")
 
 ## Phase 4 — Deeper Blur support
+
+> Paused (2026-10-14) after Phase 3. When it resumes, the focus is DLC-style content: add new
+> files to archives (item 8), add new textures to a model, content deletion, and whether a
+> whole new car can be added.
 
 1. [x] Levels: `.levelrender` + `.levelstream` (`ARCH`) decoded; every track opens in the 3D
    viewer (static world + placed props, all 19 levels)
