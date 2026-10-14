@@ -67,7 +67,8 @@ system, image decoders, the UI — is shared by every future game module.
   progress and cancel; paths are sanitised so archives can never write outside
   the chosen folder.
 - **Export** (`Ctrl+Alt+E`) writes *converted* copies: sound banks → a folder of
-  `.wav` files, models → `.obj`, textures → `.png`, `.dds`, `.jpg` or `.bmp`
+  `.wav` files, models → `.obj` (other 3D files keep their extension:
+  `Level.levelphysics.obj`), textures → `.png`, `.dds`, `.jpg` or `.bmp`
   (you choose; `.dds` keeps the game's own compressed pixels for re-importing).
 - **Edit Mode** (like OpenIV): off at every start; turning it on (`Ctrl+M`)
   asks for confirmation and shows a red **EDIT MODE** badge. Only then can you:

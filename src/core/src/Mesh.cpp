@@ -50,6 +50,16 @@ float halfToFloat(std::uint16_t h) noexcept
     return std::bit_cast<float>(sign | ((exponent + 112) << 23) | (mantissa << 13));
 }
 
+std::filesystem::path objPath(const std::filesystem::path& source)
+{
+    std::filesystem::path out = source;
+    if (out.extension() == ".model")
+        out.replace_extension(".obj");
+    else
+        out += ".obj";
+    return out;
+}
+
 std::string toObj(const Mesh& mesh)
 {
     std::string out;

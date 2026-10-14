@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -118,6 +119,11 @@ namespace mesh {
 /// when the mesh has them. Left-handed models are mirrored so they open the
 /// right way round in Blender and other right-handed tools.
 [[nodiscard]] std::string toObj(const Mesh& mesh);
+
+/// Where a decoded 3D file is exported: "car.model" → "car.obj"; other formats
+/// keep their extension ("Level.levelphysics.obj"), as one folder can hold
+/// several of them with the same name (a level's render and collision).
+[[nodiscard]] std::filesystem::path objPath(const std::filesystem::path& source);
 
 } // namespace mesh
 } // namespace viewer

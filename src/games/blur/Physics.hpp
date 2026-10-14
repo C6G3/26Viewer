@@ -3,6 +3,7 @@
 #include "viewer/core/ContentRegistry.hpp"
 #include "viewer/core/Mesh.hpp"
 
+#include <array>
 #include <functional>
 #include <string>
 #include <vector>
@@ -19,6 +20,8 @@ struct CollisionShape {
     std::vector<std::uint32_t> indices;     ///< Three per triangle.
     std::vector<std::uint16_t> surfaces;    ///< Surface material per triangle (triangle meshes), else empty.
     std::uint16_t material = 0;             ///< Surface material of the whole shape (boxes, hulls…).
+    std::uint32_t flags = 0;                ///< Its object's flags: 0 for movable objects, 0x15f… for the static world.
+    std::array<float, 3> placedAt{0, 0, 0}; ///< Where its object is placed (the stream's placement words).
 };
 
 /// What a physics stream holds, ready to draw.

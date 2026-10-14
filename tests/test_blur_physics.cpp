@@ -381,6 +381,17 @@ TEST_CASE("Real Blur collision (set BLUR_DIR to enable)")
                 CHECK(tarmac->lods[0].indexCount == 27418 * 3);
                 CHECK(std::ranges::count_if(mesh->parts, [](const Mesh::Part& p) { return p.startHidden; }) > 0);
             }
+            // Movable pieces the file gives no place (stacked at the origin) are
+            // listed apart and hidden: Hackney's construction barriers.
+            const auto unplaced = std::ranges::count_if(
+                mesh->parts, [](const Mesh::Part& p) { return p.group.contains("not placed"); });
+            CHECK(std::ranges::all_of(mesh->parts, [](const Mesh::Part& p) {
+                return !p.group.contains("not placed") || p.startHidden;
+            }));
+            if (folder.path().filename() == "uk_london_hackney")
+                CHECK(unplaced >= 117);
+            if (folder.path().filename() == "uk_brighton")
+                CHECK(unplaced == 0); // its one movable post stands where it belongs
         }
     }
     CHECK(levels == 19);

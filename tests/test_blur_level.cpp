@@ -44,6 +44,13 @@ TEST_CASE("Level decoder rejects files that aren't a level")
     CHECK_FALSE(LevelDecoder().canDecode("levelphysics", {}));
 }
 
+TEST_CASE("Exported 3D files keep apart a level's files of the same name")
+{
+    CHECK(mesh::objPath("cars/audi.model") == std::filesystem::path("cars/audi.obj"));
+    CHECK(mesh::objPath("levels/x/Level.levelphysics") == std::filesystem::path("levels/x/Level.levelphysics.obj"));
+    CHECK(mesh::objPath("levels/x/Level.levelrender") != mesh::objPath("levels/x/Level.levelphysics"));
+}
+
 TEST_CASE("Real Blur levels (set BLUR_DIR to enable)")
 {
     const char* dir = std::getenv("BLUR_DIR");

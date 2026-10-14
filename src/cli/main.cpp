@@ -436,8 +436,7 @@ int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& 
             ++models;
             triangles += mesh->triangleCount();
             if (!outDir.empty()) {
-                fs::path dest = outDir / sanitizeRelativePath(node->virtualPath());
-                dest.replace_extension(".obj");
+                const fs::path dest = mesh::objPath(outDir / sanitizeRelativePath(node->virtualPath()));
                 const std::string obj = mesh::toObj(*mesh);
                 if (auto ok = writeFile(dest, asBytes(obj)); !ok)
                     report(ok.error().message);

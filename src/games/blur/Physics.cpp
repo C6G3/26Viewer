@@ -157,6 +157,7 @@ Placement readObjectPlacement(Stream& s)
 struct Base {
     std::uint32_t handle = 0;
     std::uint32_t material = 0;           ///< Surface type.
+    std::uint32_t flags = 0;              ///< 0: a movable object; static world pieces 0x15f, 0x17f…
     std::array<float, 3> offset{0, 0, 0}; ///< Centre of mass.
 };
 
@@ -167,7 +168,7 @@ Base readBase(Stream& s, std::uint32_t version)
     s.u32();
     if (version >= 2)
         b.material = s.u32();
-    s.u32(); // flags
+    b.flags = s.u32();
     s.u32();
     s.f32();
     b.handle = s.u32();
@@ -191,6 +192,7 @@ struct Geometry {
     std::uint32_t copyOf = 0; ///< Type 10: handle of the shape it repeats.
     bool drawable = false;
     std::uint16_t material = 0;
+    std::uint32_t flags = 0;
 };
 
 void addQuad(std::vector<std::uint32_t>& out, std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t d)
@@ -440,6 +442,7 @@ Result<Geometry> readShape(Stream& s, std::uint32_t type, std::uint32_t version,
     if (g.positions.empty() || g.indices.empty())
         g.drawable = false;
     g.handle = base.handle;
+    g.flags = base.flags;
     g.material = static_cast<std::uint16_t>(std::min<std::uint32_t>(base.material, 0xFFFF));
     return g;
 }
@@ -487,7 +490,7 @@ Result<CollisionSet> readPhysicsStream(ByteSpan data)
                 return;
             place(g, p);
             set.shapes.push_back({std::move(g.kind), owner, object, std::move(g.positions), std::move(g.indices),
-                                  std::move(g.surfaces), g.material});
+                                  std::move(g.surfaces), g.material, g.flags, placement.t});
         };
         if (type == 11) { // a template: drawn where type 10 copies place it
             templates[shape->handle] = *shape;
@@ -512,7 +515,7 @@ Result<CollisionSet> readPhysicsStream(ByteSpan data)
     for (const std::uint32_t handle : templateObjects) {
         Geometry g = templates[handle];
         set.shapes.push_back({std::move(g.kind), handle, set.objects, std::move(g.positions), std::move(g.indices),
-                              std::move(g.surfaces), g.material});
+                              std::move(g.surfaces), g.material, g.flags, {0, 0, 0}});
     }
     return set;
 }
@@ -607,7 +610,7 @@ Result<Mesh> LevelPhysicsDecoder::decode(ByteSpan data) const
         return std::unexpected(root.error());
     Mesh mesh;
     mesh.leftHanded = true; // Direct3D, like the models
-    std::size_t routes = 0, objects = 0;
+    std::size_t routes = 0, objects = 0, unplaced = 0;
     std::vector<std::string> problems;
     const auto addStream = [&](const Chunk& chunk, const std::string& group) {
         auto set = readPhysicsStream(data.subspan(chunk.payloadOffset(), chunk.payloadSize()));
@@ -616,21 +619,40 @@ Result<Mesh> LevelPhysicsDecoder::decode(ByteSpan data) const
             return;
         }
         objects += set->objects;
+        // Movable pieces (flags 0) stacked at the world's origin: the file has
+        // no place for them (Hackney's 59 construction barriers); the game puts
+        // them somewhere while it runs. Listed apart, hidden.
+        std::vector<CollisionShape> placed, unplacedHere;
+        for (CollisionShape& shape : set->shapes) {
+            const bool atOrigin = std::abs(shape.placedAt[0]) < 1.0f && std::abs(shape.placedAt[2]) < 1.0f;
+            if (shape.flags == 0 && atOrigin)
+                unplacedHere.push_back(std::move(shape));
+            else
+                placed.push_back(std::move(shape));
+        }
+        unplaced += unplacedHere.size();
         std::map<std::string, std::size_t> counters;
         std::map<std::size_t, std::string> names; // object -> name, so a mesh split by surface keeps one name
-        appendCollisionParts(
-            mesh, set->shapes, group,
-            [&](const CollisionShape& shape) {
-                auto [it, added] = names.try_emplace(shape.object);
-                if (added) {
-                    std::string kind = shape.kind; // "Triangle mesh 2" reads long in the list: "Mesh 2"
-                    if (const auto at = kind.find("Triangle mesh"); at != std::string::npos)
-                        kind.replace(at, 13, at ? "mesh" : "Mesh");
-                    it->second = std::format("{} {}", kind, ++counters[kind]);
-                }
-                return it->second;
-            },
-            [](const CollisionShape&) { return -1; });
+        const auto add = [&](const std::vector<CollisionShape>& shapes, const std::string& partGroup) {
+            appendCollisionParts(
+                mesh, shapes, partGroup,
+                [&](const CollisionShape& shape) {
+                    auto [it, added] = names.try_emplace(shape.object);
+                    if (added) {
+                        std::string kind = shape.kind; // "Triangle mesh 2" reads long in the list: "Mesh 2"
+                        if (const auto at = kind.find("Triangle mesh"); at != std::string::npos)
+                            kind.replace(at, 13, at ? "mesh" : "Mesh");
+                        it->second = std::format("{} {}", kind, ++counters[kind]);
+                    }
+                    return it->second;
+                },
+                [](const CollisionShape&) { return -1; });
+        };
+        add(placed, group);
+        const std::size_t before = mesh.parts.size();
+        add(unplacedHere, group + " · not placed (at the origin)");
+        for (std::size_t p = before; p < mesh.parts.size(); ++p)
+            mesh.parts[p].startHidden = true;
     };
     // A race uses one route layout, so only the first is shown at first (the
     // others' barriers would stand across it).
@@ -647,8 +669,9 @@ Result<Mesh> LevelPhysicsDecoder::decode(ByteSpan data) const
                 addStream(route, std::format("Route {}", routes));
                 if (mesh.parts.size() == before)
                     continue; // no barriers in this layout
-                for (std::size_t p = before; p < mesh.parts.size(); ++p)
-                    mesh.parts[p].startHidden = !firstRoute;
+                if (!firstRoute)
+                    for (std::size_t p = before; p < mesh.parts.size(); ++p)
+                        mesh.parts[p].startHidden = true;
                 firstRoute = false;
             }
         }
@@ -659,6 +682,10 @@ Result<Mesh> LevelPhysicsDecoder::decode(ByteSpan data) const
     mesh.notes.push_back(std::format("Collision: {} object(s), {} part(s) coloured by surface material{}", objects,
                                      mesh.parts.size(),
                                      routes ? std::format(", {} route layout(s) (one shown at first)", routes) : ""));
+    if (unplaced)
+        mesh.notes.push_back(std::format("{} movable shape(s) have no place in the file (the game places them; listed "
+                                         "as \"not placed\", hidden)",
+                                         unplaced));
     for (const std::string& problem : problems)
         mesh.notes.push_back(problem);
     return mesh;
