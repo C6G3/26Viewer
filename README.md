@@ -93,8 +93,11 @@ system, image decoders, the UI — is shared by every future game module.
     just that file (other changes in the archive stay); on an archive or loose
     file, the whole thing.
 - **Picks up where you left off**: the last game (and open folder or file) reopens at
-  start-up. Toggle with *File ▸ Reopen Last Game at Startup*. Settings live in
-  `%APPDATA%\26Viewer\26Viewer.ini`.
+  start-up. Toggle with *File ▸ Reopen Last Game at Startup*.
+- **Settings** (*Edit ▸ Settings*, `Ctrl+,`): theme, reopen at start-up, the
+  folder Extract / Export dialogs start in, how many files are extracted or
+  exported at once (several in parallel by default) and the preview size
+  limits. Settings live in `%APPDATA%\26Viewer\26Viewer.ini`.
 - **Modern Windows UI**: Windows 11 style, light/dark mode that follows the OS
   *live* (or forced via *View ▸ Theme*), Fluent icons, dark title bar,
   per-monitor high-DPI.
