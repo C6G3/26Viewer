@@ -65,7 +65,9 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 
 1. [x] Levels: `.levelrender` + `.levelstream` (`ARCH`) decoded; every track opens in the 3D
    viewer (static world + placed props, all 19 levels)
-   - [ ] Level textures (texture blocks + mips from levels 1–9)
+   - [x] Level textures (texture blocks, mip chains rebuilt from levels 0–9, the render
+     file's own textures), alpha from the game's render states, vertex alpha for decals
+   - [ ] Lightmaps (`g_tLightmap`, second UV set) and the ocean
    - [ ] `Level.level` (adverts, navigation data, build log) as text
 2. [x] `.model` geometry: vertex/index buffers, all LODs, shadow hulls (see docs/formats/blur.md); next: part names, materials, UVs
 3. [x] 3D preview: orbit camera, parts tree, solid/wireframe/grid/shadow, LOD picker (OpenGL)

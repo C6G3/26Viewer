@@ -169,7 +169,10 @@ Result<int> exportOne(const Session& session, const ExtractItem& item, const std
                 std::filesystem::create_directories(folder, ec);
                 for (const Mesh::Texture& t : mesh->textures) {
                     const auto file = folder / sanitizeRelativePath(t.name + ".png");
-                    if (!toQImage(t.image).save(toQString(file), "PNG"))
+                    const auto picture = mesh::textureImage(t);
+                    if (!picture)
+                        return std::unexpected(picture.error());
+                    if (!toQImage(*picture).save(toQString(file), "PNG"))
                         return fail(ErrorCode::Io, "could not write {}", toQString(file).toStdString());
                     ++written;
                 }

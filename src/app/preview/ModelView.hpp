@@ -13,6 +13,7 @@
 #include <QWidget>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QCheckBox;
@@ -56,6 +57,9 @@ public:
     /// Body colour for car paint (the game lets the player choose it).
     void setPaintColor(const QColor& color);
     void resetView();
+    /// Turns the camera: yaw and pitch in degrees, `zoom` times closer than the
+    /// whole-model view, looking at `target` (file coordinates) if given.
+    void setCamera(float yaw, float pitch, float zoom, std::optional<QVector3D> target);
 
     /// Up to four bones moving a vertex (index into the bone matrices; -1: none).
     struct Influence {
@@ -84,6 +88,10 @@ private:
     void upload();
     /// The model's textures on the GPU (one per Mesh texture; 0 when it has no pixels).
     void uploadTextures();
+    void uploadImage(std::size_t texture, const Image& image);
+    /// A texture's stored DXT pixels, every level as it is; false if not DXT.
+    bool uploadCompressed(std::size_t texture, const image::Surfaces& surfaces);
+    void setTextureSampling();
     void releaseTextures();
     void buildGrid(const QVector3D& lo, const QVector3D& hi);
     [[nodiscard]] QMatrix4x4 viewMatrix() const;
@@ -151,6 +159,7 @@ public:
     [[nodiscard]] const std::shared_ptr<const Skeleton>& skeleton() const noexcept { return m_skeleton; }
     /// Moves the animation to `frame` (paused).
     void showAnimationFrame(float frame) { showFrame(frame); }
+    void setCamera(float yaw, float pitch, float zoom, std::optional<QVector3D> target);
 
 signals:
     /// "Animation…": choose an animation for the skeleton.

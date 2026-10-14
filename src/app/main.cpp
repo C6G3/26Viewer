@@ -24,6 +24,7 @@ struct Options {
     QString screenshot;
     QString theme;
     QString animation; ///< Virtual path of an animation to pose the model with ("path@frame").
+    QString camera;    ///< --camera: "yaw,pitch,zoom[,x,y,z]".
     int tab = -1;
     bool editMode = false;
 };
@@ -51,11 +52,15 @@ Options parseArguments(const QApplication& app)
         QStringLiteral("file"));
     const QCommandLineOption editMode(QStringLiteral("edit-mode"),
                                       QStringLiteral("Start with Edit Mode on, without the confirmation (automation)."));
+    const QCommandLineOption camera(QStringLiteral("camera"),
+                                    QStringLiteral("3D view for the screenshot: yaw,pitch,zoom[,x,y,z] (degrees; "
+                                                   "zoom 1 = the whole model; the point to look at)."),
+                                    QStringLiteral("view"));
     const QCommandLineOption animation(QStringLiteral("animation"),
                                        QStringLiteral("Pose the selected model with this animation (virtual path, "
                                                       "optionally @frame)."),
                                        QStringLiteral("path"));
-    parser.addOptions({select, tab, theme, screenshot, editMode, animation});
+    parser.addOptions({select, tab, theme, screenshot, editMode, animation, camera});
     parser.process(app);
 
     Options o;
@@ -65,6 +70,7 @@ Options parseArguments(const QApplication& app)
     o.theme = parser.value(theme).toLower();
     o.editMode = parser.isSet(editMode);
     o.animation = parser.value(animation);
+    o.camera = parser.value(camera);
     const QStringList tabs{"preview", "structure", "hex", "properties", "edit", "textures", "animations"};
     o.tab = tabs.indexOf(parser.value(tab).toLower());
     return o;
@@ -120,6 +126,8 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
                                                   }
                                                   if (o.tab >= 0)
                                                       pane->setCurrentTab(o.tab);
+                                                  if (!o.camera.isEmpty())
+                                                      pane->setCamera(o.camera);
                                                   if (!o.animation.isEmpty()) {
                                                       const qsizetype at = o.animation.lastIndexOf(QLatin1Char('@'));
                                                       pane->showAnimation(at > 0 ? o.animation.left(at) : o.animation,

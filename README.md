@@ -43,7 +43,8 @@ system, image decoders, the UI — is shared by every future game module.
     (a car's wheels, doors and bumpers; a prop's boxes and cylinders).
   - **Whole levels** (Blur `levels/<track>/Level.levelrender` or `.levelstream`): the
     track, buildings and every placed prop in 3D (Brighton: 4.7 million triangles),
-    grouped by scene node in the parts tree. Textures are not drawn yet.
+    textured as in the game (roads, buildings, signs; see-through fences and fading
+    painted lines), grouped by scene node in the parts tree.
   - **Level collision** (Blur `.levelphysics`): the track, walls and each route's
     barriers in 3D, coloured by surface (tarmac, grass, sand, water, armco…).
   - **Audio banks** (Blur `.baf`): list every sound, play / loop / seek, export WAV,

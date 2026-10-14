@@ -28,11 +28,18 @@
 #include <cstring>
 #include <format>
 #include <map>
+#include <tuple>
 #include <unordered_map>
 
 namespace viewer::games::blur {
 
 namespace {
+
+/// Texture references to this block name the render file's own textures.
+constexpr std::uint32_t kSharedBlock = 0xFFFFFFFF;
+
+/// Larger textures are shown at this size (their next smaller copy).
+constexpr std::uint32_t kMaxTextureSize = 1024;
 
 constexpr std::array<float, 16> kIdentity{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
@@ -271,6 +278,7 @@ struct IndexRange {
 struct Geometry {
     std::uint32_t primitive = 0; ///< 0 triangle list, 1 triangle strip.
     std::uint32_t indexSlot = 0; ///< Index-buffer slot (the node's index-buffer list).
+    Mesh::Part::Alpha alpha = Mesh::Part::Alpha::Opaque;
     std::vector<IndexRange> ranges;
     std::vector<Stream> streams;
 };
@@ -286,8 +294,16 @@ Geometry readGeometry(Reader& r)
     r.packed();
     if (version)
         r.packed();
-    r.ra(); // render states
-    r.skip(24);
+    // Render states: u32 × 3, then four switches (byte 0 alpha blending,
+    // byte 3 alpha test: puddles and race banners blend, foliage cuts out),
+    // u32 × 2.
+    r.ra();
+    r.skip(12);
+    const auto blend = r.get<std::uint8_t>();
+    r.skip(2);
+    const auto test = r.get<std::uint8_t>();
+    r.skip(8);
+    g.alpha = blend ? Mesh::Part::Alpha::Blend : test ? Mesh::Part::Alpha::CutOut : Mesh::Part::Alpha::Opaque;
     r.ra();
     const std::uint32_t nr = r.count(20);
     for (std::uint32_t i = 0; i < nr && r.ok(); ++i) {
@@ -494,6 +510,7 @@ struct VertexBuffer {
     int position = -1;      ///< Byte offsets of the elements (-1: none).
     int normal = -1;
     int uv = -1;
+    int color = -1; ///< Four bytes; the last is the alpha (usage 9 or 10).
     std::uint32_t positionType = 0, normalType = 0, uvType = 0;
 };
 
@@ -502,9 +519,23 @@ struct IndexBuffer {
     std::size_t data = 0;
 };
 
+/// One size of a texture: a complete picture with its own mip chain.
+struct TextureLevel {
+    image::PixelFormat format = image::PixelFormat::BC1;
+    std::uint32_t width = 0, height = 0, mips = 0; ///< width 0: not stored at this level
+    std::size_t data = 0;                          ///< File offset of the largest mip.
+    std::uint32_t size = 0;
+};
+
+struct LevelTexture {
+    std::string name; ///< "scene_vehicle_e3_diff"
+    TextureLevel smallest; ///< The block's level 0 copy (the larger ones are in levels 1-9).
+};
+
 struct DataBlock {
     std::vector<VertexBuffer> vertexBuffers;
     std::vector<IndexBuffer> indexBuffers;
+    std::vector<LevelTexture> textures;
 };
 
 /// "RA" 0, u32 size, u32 16, zero padding to a 16-byte boundary (counted from
@@ -522,6 +553,53 @@ std::optional<std::pair<std::size_t, std::uint32_t>> readBlob(Reader& r, ByteSpa
         return std::nullopt;
     r.skip(start - r.pos() + size);
     return std::pair{start, size};
+}
+
+/// u32 present; then u32 28, width, height, depth, mip count, FourCC, -1, 3
+/// and the pixels (every mip, largest first). nullopt if it can't be read.
+std::optional<TextureLevel> readTextureLevel(Reader& r, ByteSpan d, std::size_t arch)
+{
+    TextureLevel t;
+    if (r.u32() == 0)
+        return r.ok() ? std::optional(t) : std::nullopt;
+    r.u32();
+    t.width = r.u32();
+    t.height = r.u32();
+    r.u32(); // depth
+    t.mips = r.u32();
+    const auto format = image::fromD3DFormat(r.u32());
+    r.skip(8);
+    const auto blob = readBlob(r, d, arch);
+    if (!blob || !format || t.width == 0 || t.height == 0 || t.width > 8192 || t.height > 8192 || t.mips == 0
+        || t.mips > 16)
+        return std::nullopt;
+    t.format = *format;
+    t.data = blob->first;
+    t.size = blob->second;
+    if (image::surfaceSize(t.format, t.width, t.height) > t.size)
+        return std::nullopt;
+    return t;
+}
+
+/// Level 1-9 of a texture block: a larger copy of each of its textures (or none).
+std::vector<TextureLevel> readTextureLevels(ByteSpan d, std::size_t p, std::size_t arch)
+{
+    Reader r(d, p);
+    r.ra();
+    r.ra();
+    r.skip(8);
+    std::vector<TextureLevel> out;
+    const std::uint32_t n = r.count(16);
+    for (std::uint32_t i = 0; i < n && r.ok(); ++i) {
+        r.ra();
+        r.ra();
+        r.u32();
+        const auto level = readTextureLevel(r, d, arch);
+        if (!level)
+            break;
+        out.push_back(*level);
+    }
+    return out;
 }
 
 std::optional<DataBlock> readDataBlock(ByteSpan d, std::size_t p, std::size_t arch)
@@ -571,6 +649,8 @@ std::optional<DataBlock> readDataBlock(ByteSpan d, std::size_t p, std::size_t ar
             } else if (usage == 5 && index == 0 && vb.uv < 0) {
                 vb.uv = offsets[e];
                 vb.uvType = type;
+            } else if ((usage == 9 || usage == 10) && (type == 0x0B || type == 0x04) && vb.color < 0) {
+                vb.color = offsets[e];
             }
         }
         block.vertexBuffers.push_back(vb);
@@ -591,7 +671,79 @@ std::optional<DataBlock> readDataBlock(ByteSpan d, std::size_t p, std::size_t ar
     }
     if (!r.ok())
         return std::nullopt;
+    // Then objects (none in data blocks) and textures: RA 2, RA 0, u32 2, name,
+    // RA 1 + ten words, u32 hash, then its level 0 copy (the smallest).
+    r.ra();
+    if (r.u32() != 0)
+        return block;
+    const std::uint32_t nt = r.count(20);
+    for (std::uint32_t i = 0; i < nt && r.ok(); ++i) {
+        r.ra();
+        r.ra();
+        r.u32();
+        LevelTexture t;
+        t.name = r.str();
+        if (r.ra() != 1)
+            break;
+        r.skip(40);
+        r.u32(); // hash
+        const auto level = readTextureLevel(r, d, arch);
+        if (!level)
+            break;
+        t.smallest = *level;
+        block.textures.push_back(std::move(t));
+    }
     return block;
+}
+
+/// The textures the render file holds itself (Scene: race barriers, parked
+/// cars, lamp posts, the environment cube…): what references to block
+/// 0xFFFFFFFF name, by position. "RA" 0, "RA" 0, u32 2, u32 count, then per
+/// texture: name, u32 hash, "RA" 2, "RA" 0, u32 2, name, "RA" 1 + ten words,
+/// u32 hash, u32 size, then (size bytes) u32 width, height, layers, mip count,
+/// FourCC, -1, u32 and the pixels.
+std::vector<std::pair<std::string, TextureLevel>> readSharedTextures(ByteSpan scene, std::size_t sceneOffset)
+{
+    static constexpr std::array<std::byte, 12> head{std::byte{'R'}, std::byte{'A'}, std::byte{0}, std::byte{0},
+                                                    std::byte{'R'}, std::byte{'A'}, std::byte{0}, std::byte{0},
+                                                    std::byte{2},   std::byte{0},   std::byte{0}, std::byte{0}};
+    std::vector<std::pair<std::string, TextureLevel>> out;
+    for (auto it = scene.begin(); (it = std::search(it, scene.end(), head.begin(), head.end())) != scene.end(); ++it) {
+        Reader r(scene, static_cast<std::size_t>(it - scene.begin()) + head.size());
+        const std::uint32_t n = r.count(64);
+        out.clear();
+        for (std::uint32_t i = 0; i < n && r.ok(); ++i) {
+            std::string name = r.str();
+            r.u32();
+            r.ra();
+            r.ra();
+            if (r.u32() != 2 || r.str() != name || r.ra() != 1)
+                break;
+            r.skip(40);
+            r.u32();
+            const std::uint32_t size = r.u32();
+            const std::size_t end = r.pos() + size;
+            TextureLevel t;
+            t.width = r.u32();
+            t.height = r.u32();
+            const std::uint32_t layers = r.u32();
+            t.mips = r.u32();
+            const auto format = image::fromD3DFormat(r.u32());
+            r.skip(8);
+            if (!r.ok() || !format || end > scene.size() || size < 28)
+                break;
+            t.format = *format;
+            t.data = sceneOffset + r.pos();
+            t.size = size - 28;
+            if (layers != 1 || image::surfaceSize(t.format, t.width, t.height) > t.size)
+                t.width = 0; // a cube map (the environment): not a colour texture
+            r.skip(end - r.pos());
+            out.emplace_back(std::move(name), t);
+        }
+        if (n > 0 && out.size() == n)
+            return out;
+    }
+    return {};
 }
 
 // ---- the stream's table of contents (end of the render file's Scene) --------------
@@ -703,8 +855,10 @@ enum class Placed {
 
 class Builder {
 public:
-    Builder(ByteSpan stream, std::map<ResIdx, std::size_t> where, std::map<std::size_t, std::size_t> archOf)
-        : m_d(stream), m_where(std::move(where)), m_archOf(std::move(archOf))
+    Builder(ByteSpan stream, std::map<ResIdx, std::size_t> where, std::map<std::size_t, std::size_t> archOf,
+            ByteSpan render, std::vector<std::pair<std::string, TextureLevel>> shared)
+        : m_d(stream), m_render(render), m_where(std::move(where)), m_archOf(std::move(archOf)),
+          m_shared(std::move(shared))
     {
         m_mesh.leftHanded = true;
     }
@@ -769,6 +923,10 @@ public:
                 for (int k = 0; k < 2; ++k)
                     m_mesh.uvs.push_back(vb.uv >= 0 ? readComponent(m_d, at + static_cast<std::size_t>(vb.uv), vb.uvType, k)
                                                     : 0.0f);
+                for (std::size_t k = 0; k < 4; ++k)
+                    m_mesh.colors.push_back(
+                        vb.color >= 0 ? std::to_integer<std::uint8_t>(m_d[at + static_cast<std::size_t>(vb.color) + k])
+                                      : std::uint8_t{255});
             }
             // Indices (absolute in the buffer) → this copy's vertices.
             const auto index = [&](std::uint32_t i, std::uint32_t& out) {
@@ -800,13 +958,120 @@ public:
         return Placed::Yes;
     }
 
+    /// The mesh texture for a node's texture reference (block, index): the
+    /// largest copy up to kMaxTextureSize, its pixels kept as stored. -1 when
+    /// the level doesn't hold it (the game's own: environment maps…).
+    int texture(ResIdx ref)
+    {
+        if (const auto it = m_textureOf.find(ref); it != m_textureOf.end())
+            return it->second;
+        int& index = m_textureOf[ref];
+        index = -1;
+        if (ref.first == kSharedBlock) { // the render file's own
+            if (ref.second >= m_shared.size() || m_shared[ref.second].second.width == 0)
+                return -1;
+            const auto& [name, level] = m_shared[ref.second];
+            const auto first = m_render.begin() + static_cast<std::ptrdiff_t>(level.data);
+            index = addTexture(name, level, ByteBuffer(first, first + level.size), level.mips);
+            return index;
+        }
+        const DataBlock* block = m_where.contains({ref.first, 0}) ? dataBlock(ref.first) : nullptr;
+        if (!block || ref.second >= block->textures.size())
+            return -1;
+        // Level 0 holds the small sizes (a whole mip chain); each higher level
+        // one larger size on its own. Put the chain back together, largest
+        // first, from the biggest size up to kMaxTextureSize.
+        const LevelTexture& t = block->textures[ref.second];
+        std::vector<TextureLevel> copies{t.smallest};
+        for (std::uint32_t level = 1; level < 10; ++level)
+            if (const auto at = m_where.find({ref.first, level}); at != m_where.end()) {
+                const auto list = readTextureLevels(m_d, at->second, m_archOf.at(at->second));
+                if (ref.second < list.size() && list[ref.second].width != 0)
+                    copies.push_back(list[ref.second]);
+            }
+        TextureLevel chain;
+        ByteBuffer pixels;
+        std::uint32_t w = 0, h = 0;
+        for (const TextureLevel& c : copies)
+            if (c.width != 0 && c.width <= kMaxTextureSize && c.height <= kMaxTextureSize && c.width > w) {
+                chain = c;
+                w = c.width;
+                h = c.height;
+            }
+        if (w == 0)
+            return -1;
+        std::uint32_t mips = 0;
+        while (true) {
+            const auto copy = std::ranges::find_if(copies, [&](const TextureLevel& c) { return c.width == w && c.height == h; });
+            if (copy == copies.end())
+                break;
+            // As many sizes as the copy holds (one, or the rest of the chain).
+            std::size_t at = copy->data, left = copy->size;
+            bool more = true;
+            while (more) {
+                const std::size_t size = image::surfaceSize(chain.format, w, h);
+                if (size > left)
+                    break;
+                pixels.insert(pixels.end(), m_d.begin() + static_cast<std::ptrdiff_t>(at),
+                              m_d.begin() + static_cast<std::ptrdiff_t>(at + size));
+                at += size;
+                left -= size;
+                ++mips;
+                more = w > 1 || h > 1;
+                w = std::max(1u, w / 2);
+                h = std::max(1u, h / 2);
+            }
+            if (!more)
+                break;
+        }
+        index = addTexture(t.name, chain, pixels, mips);
+        return index;
+    }
+
+    int addTexture(const std::string& name, const TextureLevel& level, ByteBuffer pixels, std::uint32_t mips)
+    {
+        Mesh::Texture out;
+        out.name = name;
+        out.stored.format = level.format;
+        out.stored.width = level.width;
+        out.stored.height = level.height;
+        out.stored.mipCount = mips;
+        out.stored.data = std::move(pixels);
+        m_mesh.textures.push_back(std::move(out));
+        return static_cast<int>(m_mesh.textures.size()) - 1;
+    }
+
+    /// The colour textures a geometry's material binds (its value set's
+    /// texture elements, which index the node's texture list).
+    std::vector<Mesh::TextureSlot> textureSlots(const SceneNode& node, ResIdx ref)
+    {
+        std::vector<Mesh::TextureSlot> slots;
+        if (ref.second != 0 || ref.first >= node.values.size())
+            return slots;
+        const ValueSet& set = node.values[ref.first];
+        std::size_t at = 0;
+        for (const MaterialElement& e : node.materials.types[set.type].elements) {
+            static constexpr std::string_view kColour[] = {"g_tAlbedo", "g_tColour", "g_tTexture", "g_2L_tTexture",
+                                                           "g_tNeon"};
+            if (e.kind == 7 && e.count == 1 && at < set.words.size()
+                && std::ranges::find(kColour, std::string_view(e.name)) != std::end(kColour)
+                && set.words[at] < node.textures.size())
+                slots.push_back({e.name, texture(node.textures[set.words[at]])});
+            at += e.count;
+        }
+        return slots;
+    }
+
     Mesh& mesh() noexcept { return m_mesh; }
 
 private:
     ByteSpan m_d;
+    ByteSpan m_render;
     std::map<ResIdx, std::size_t> m_where;     ///< (block, level) → file offset of its header
     std::map<std::size_t, std::size_t> m_archOf; ///< block header offset → its section's start
     std::unordered_map<std::uint32_t, std::optional<DataBlock>> m_blocks;
+    std::map<ResIdx, int> m_textureOf;
+    std::vector<std::pair<std::string, TextureLevel>> m_shared; ///< The render file's own textures.
     Mesh m_mesh;
 };
 
@@ -859,7 +1124,7 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
         }
     }
 
-    Builder builder(stream, where, archOf);
+    Builder builder(stream, where, archOf, render, readSharedTextures(sceneData, scene->payloadOffset()));
     std::size_t nodes = 0, unread = 0, skipped = 0;
     std::array<std::size_t, 3> placed{}; // by Placed
     for (const Section& s : *table) {
@@ -878,7 +1143,8 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
             ++nodes;
             for (const SceneNode& renderList : *lists) {
                 const SceneNode* const node = &renderList;
-                const auto addPart = [&](std::uint32_t first, std::string name, std::string shader) {
+                const auto addPart = [&](std::uint32_t first, std::string name, std::string shader,
+                                         std::vector<Mesh::TextureSlot> slots, Mesh::Part::Alpha alpha) {
                     Mesh& mesh = builder.mesh();
                     const auto count = static_cast<std::uint32_t>(mesh.indices.size()) - first;
                     if (count == 0)
@@ -888,21 +1154,50 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
                     part.group = std::format("Node {}", node->block);
                     part.shader = std::move(shader);
                     part.material = part.shader;
+                    part.textures = std::move(slots);
+                    part.alpha = alpha;
                     part.lods.push_back({first, count});
                     mesh.parts.push_back(std::move(part));
                 };
-                // The world itself (already in place): one part per effect.
-                std::map<std::string, std::vector<const Geometry*>> byEffect;
-                for (const Geometry& g : node->staticGeometry)
-                    byEffect[g.streams.empty() ? std::string{} : effectOf(*node, g.streams.front().values)].push_back(&g);
-                for (const auto& [effect, list] : byEffect) {
+                // A geometry's material: its effect and the colour textures it binds.
+                const auto materialOf = [&](const Geometry& g) {
+                    std::pair<std::string, std::vector<Mesh::TextureSlot>> m;
+                    if (!g.streams.empty()) {
+                        m.first = effectOf(*node, g.streams.front().values);
+                        m.second = builder.textureSlots(*node, g.streams.front().values);
+                    }
+                    return m;
+                };
+                const auto textureName = [&](const std::vector<Mesh::TextureSlot>& slots) {
+                    for (const Mesh::TextureSlot& slot : slots)
+                        if (slot.texture >= 0)
+                            return builder.mesh().textures[static_cast<std::size_t>(slot.texture)].name;
+                    return std::string{};
+                };
+                // The world itself (already in place): one part per material.
+                struct Group {
+                    std::vector<Mesh::TextureSlot> slots;
+                    std::vector<const Geometry*> geometry;
+                };
+                std::map<std::tuple<std::string, int, Mesh::Part::Alpha>, Group> byMaterial;
+                for (const Geometry& g : node->staticGeometry) {
+                    auto [effect, slots] = materialOf(g);
+                    const int colour = slots.empty() ? -1 : slots.front().texture;
+                    Group& group = byMaterial[{std::move(effect), colour, g.alpha}];
+                    group.slots = std::move(slots);
+                    group.geometry.push_back(&g);
+                }
+                for (auto& [key, group] : byMaterial) {
                     const auto first = static_cast<std::uint32_t>(builder.mesh().indices.size());
-                    for (const Geometry* g : list)
+                    for (const Geometry* g : group.geometry)
                         ++placed[static_cast<std::size_t>(builder.addInstance(*node, *g, kIdentity))];
+                    const std::string& effect = std::get<0>(key);
                     std::string name = effect.empty() ? std::string("World") : effect;
                     if (name.ends_with(".fx"))
                         name.resize(name.size() - 3);
-                    addPart(first, std::move(name), effect);
+                    if (const std::string texture = textureName(group.slots); !texture.empty())
+                        name = std::format("{} · {}", texture, name);
+                    addPart(first, std::move(name), effect, std::move(group.slots), std::get<2>(key));
                 }
                 // Props: one part per mesh, with every instance of it placed.
                 std::vector<std::vector<const Draw*>> byGeometry(node->geometry.size());
@@ -922,8 +1217,12 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
                         else
                             ++skipped;
                     }
-                    addPart(first, std::format("Prop {} ({}×)", gi, byGeometry[gi].size()),
-                            g.streams.empty() ? std::string{} : effectOf(*node, g.streams.front().values));
+                    auto [effect, slots] = materialOf(g);
+                    const std::string texture = textureName(slots);
+                    addPart(first,
+                            texture.empty() ? std::format("Prop {} ({}×)", gi, byGeometry[gi].size())
+                                            : std::format("Prop {} ({}×) · {}", gi, byGeometry[gi].size(), texture),
+                            std::move(effect), std::move(slots), g.alpha);
                 }
             }
         }
@@ -932,8 +1231,8 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
     if (mesh.parts.empty())
         return fail(ErrorCode::InvalidFormat, "no drawable geometry found in the level ({} scene nodes)", nodes);
     skipped += placed[static_cast<std::size_t>(Placed::Invalid)];
-    mesh.notes.push_back(std::format("{} sections, {} scene nodes, {} meshes placed", table->size(), nodes,
-                                     placed[static_cast<std::size_t>(Placed::Yes)]));
+    mesh.notes.push_back(std::format("{} sections, {} scene nodes, {} meshes placed, {} textures", table->size(),
+                                     nodes, placed[static_cast<std::size_t>(Placed::Yes)], mesh.textures.size()));
     if (const std::size_t missing = placed[static_cast<std::size_t>(Placed::NotShipped)])
         mesh.notes.push_back(std::format("{} mesh(es) not drawn: their data isn't in the level's files", missing));
     if (unread)

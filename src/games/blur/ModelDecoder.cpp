@@ -785,11 +785,11 @@ std::vector<Mesh::Texture> readTextures(const Scanner& s, ByteSpan d, std::size_
         auto img = image::decodeSurface(d.subspan(top.offset, image::surfaceSize(t.format, top.width, top.height)),
                                         t.format, top.width, top.height);
         if (!img) { // kept (empty) so the materials' texture numbers still line up
-            out.push_back({t.name, {}});
+            out.push_back({t.name, {}, {}});
             continue;
         }
         img->mipCount = t.mipCount;
-        out.push_back({t.name, std::move(*img)});
+        out.push_back({t.name, std::move(*img), {}});
     }
     return out;
 }

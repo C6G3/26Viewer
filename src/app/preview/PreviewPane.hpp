@@ -55,6 +55,8 @@ public:
     /// Poses the shown model with the animation file at `virtualPath`, at
     /// `frame` (automation: --animation). False if it can't be used.
     bool showAnimation(const QString& virtualPath, float frame);
+    /// Screenshots: "yaw,pitch,zoom[,x,y,z]" for the 3D view (see ModelCanvas::setCamera).
+    void setCamera(const QString& spec);
     /// Opens the animation picker for the shown model (its "Animation…" button).
     void chooseAnimation();
 

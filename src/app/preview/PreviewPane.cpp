@@ -625,6 +625,17 @@ void PreviewPane::chooseAnimation()
         m_model->setAnimation(picker.selectedAnimation(), toQString(picker.selectedNode()->virtualPath()));
 }
 
+void PreviewPane::setCamera(const QString& spec)
+{
+    const QStringList v = spec.split(QLatin1Char(','));
+    if (v.size() < 3)
+        return;
+    std::optional<QVector3D> target;
+    if (v.size() >= 6)
+        target = QVector3D(v[3].toFloat(), v[4].toFloat(), v[5].toFloat());
+    m_model->setCamera(v[0].toFloat(), v[1].toFloat(), v[2].toFloat(), target);
+}
+
 bool PreviewPane::showAnimation(const QString& virtualPath, float frame)
 {
     if (!m_session || !m_model->skeleton())

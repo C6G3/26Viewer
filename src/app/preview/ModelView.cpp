@@ -43,14 +43,17 @@ constexpr const char* kVertexShader = R"(
 attribute vec3 position;
 attribute vec3 normal;
 attribute vec2 uv;
+attribute float vertexAlpha;
 uniform mat4 mvp;
 uniform mat4 model;
 uniform mat3 normalMatrix;
 varying vec3 vNormal;
 varying vec2 vUv;
+varying float vAlpha;
 void main() {
     vNormal = normalMatrix * normal;
     vUv = uv;
+    vAlpha = vertexAlpha;
     gl_Position = mvp * model * vec4(position, 1.0);
 }
 )";
@@ -66,11 +69,13 @@ uniform vec3 up;         // the world's up, in view space (sky above, ground bel
 uniform sampler2D tex;
 uniform float textured;  // 1: colour from the part's texture
 uniform float alphaTest; // texture alpha below this is cut out
-uniform float texAlpha;  // 1: the texture's alpha sets the coverage (glows)
+uniform float texAlpha;  // 1: the texture's (and vertex's) alpha sets the coverage (glows, decals)
 varying vec3 vNormal;
 varying vec2 vUv;
+varying float vAlpha;
 void main() {
     vec4 t = textured > 0.5 ? texture2D(tex, vUv) : vec4(1.0);
+    t.a *= mix(1.0, vAlpha, texAlpha);
     if (t.a < alphaTest)
         discard;
     vec3 base = color * t.rgb;
@@ -173,11 +178,17 @@ QVector3D effectTint(const Mesh::Part& part)
 /// How a textured part uses its texture's alpha.
 enum class AlphaUse { Opaque, CutOut, Blend, Glow };
 
-AlphaUse alphaUse(const std::string& shader, bool textureHasAlpha)
+AlphaUse alphaUse(const Mesh::Part& part, bool textureHasAlpha)
 {
-    const QString s = QString::fromStdString(shader);
+    const QString s = QString::fromStdString(part.shader);
     if (s.contains("flare", Qt::CaseInsensitive))
         return AlphaUse::Glow; // light flares: added light
+    switch (part.alpha) { // the file says how (Blur levels)
+    case Mesh::Part::Alpha::Opaque: return AlphaUse::Opaque;
+    case Mesh::Part::Alpha::CutOut: return textureHasAlpha ? AlphaUse::CutOut : AlphaUse::Opaque;
+    case Mesh::Part::Alpha::Blend: return AlphaUse::Blend;
+    case Mesh::Part::Alpha::Unknown: break;
+    }
     if (!textureHasAlpha && !s.contains("effect", Qt::CaseInsensitive))
         return AlphaUse::Opaque;
     if (s.contains("effect", Qt::CaseInsensitive))
@@ -207,7 +218,8 @@ QMatrix4x4 shadowMatrix(float h)
                       0, 0, 0, 1);
 }
 
-constexpr int kStride = 8 * sizeof(float); // position, normal, uv
+constexpr int kFloats = 9; // per vertex: position, normal, uv, alpha
+constexpr int kStride = kFloats * sizeof(float);
 
 } // namespace
 
@@ -286,14 +298,14 @@ void ModelCanvas::buildGrid(const QVector3D& lo, const QVector3D& hi)
     const int z0 = static_cast<int>(from(lo.z())), z1 = static_cast<int>(to(hi.z()));
     std::vector<float> minor, major;
     const auto line = [](std::vector<float>& out, float ax, float az, float bx, float bz, float y) {
-        out.insert(out.end(), {ax, y, az, 0, 1, 0, 0, 0, bx, y, bz, 0, 1, 0, 0, 0});
+        out.insert(out.end(), {ax, y, az, 0, 1, 0, 0, 0, 1, bx, y, bz, 0, 1, 0, 0, 0, 1});
     };
     for (int i = x0; i <= x1; ++i)
         line(i % 5 ? minor : major, i * spacing, z0 * spacing, i * spacing, z1 * spacing, m_ground);
     for (int k = z0; k <= z1; ++k)
         line(k % 5 ? minor : major, x0 * spacing, k * spacing, x1 * spacing, k * spacing, m_ground);
-    m_gridMinorPoints = static_cast<int>(minor.size() / 8);
-    m_gridMajorPoints = static_cast<int>(major.size() / 8);
+    m_gridMinorPoints = static_cast<int>(minor.size() / kFloats);
+    m_gridMajorPoints = static_cast<int>(major.size() / kFloats);
     m_gridData = std::move(minor);
     m_gridData.insert(m_gridData.end(), major.begin(), major.end());
 }
@@ -364,6 +376,16 @@ void ModelCanvas::resetView()
     update();
 }
 
+void ModelCanvas::setCamera(float yaw, float pitch, float zoom, std::optional<QVector3D> target)
+{
+    m_yaw = yaw;
+    m_pitch = std::clamp(pitch, -89.0f, 89.0f);
+    m_distance = m_radius * 2.6f / std::max(zoom, 0.001f);
+    if (target)
+        m_target = *target;
+    update();
+}
+
 bool ModelCanvas::partVisible(std::size_t part) const
 {
     return part < m_visible.size() && m_visible[part];
@@ -377,6 +399,7 @@ void ModelCanvas::initializeGL()
     m_program.bindAttributeLocation("position", 0);
     m_program.bindAttributeLocation("normal", 1);
     m_program.bindAttributeLocation("uv", 2);
+    m_program.bindAttributeLocation("vertexAlpha", 3);
     m_glReady = m_program.link();
     m_vertices.create();
     m_triangles.create();
@@ -417,7 +440,8 @@ void ModelCanvas::upload()
     const bool fileNormals = mesh.normals.size() == mesh.positions.size();
     const bool uvs = mesh.uvs.size() == 2 * mesh.vertexCount();
     std::vector<float> interleaved;
-    interleaved.reserve(mesh.vertexCount() * 8);
+    const bool alphas = mesh.colors.size() == 4 * mesh.vertexCount();
+    interleaved.reserve(mesh.vertexCount() * kFloats);
     for (std::size_t v = 0; v < mesh.vertexCount(); ++v) {
         QVector3D n = (detailed[v].isNull() ? coarse[v] : detailed[v]).normalized();
         if (fileNormals) {
@@ -427,7 +451,8 @@ void ModelCanvas::upload()
         }
         interleaved.insert(interleaved.end(), {mesh.positions[3 * v], mesh.positions[3 * v + 1],
                                                mesh.positions[3 * v + 2], n.x(), n.y(), n.z(),
-                                               uvs ? mesh.uvs[2 * v] : 0.0f, uvs ? mesh.uvs[2 * v + 1] : 0.0f});
+                                               uvs ? mesh.uvs[2 * v] : 0.0f, uvs ? mesh.uvs[2 * v + 1] : 0.0f,
+                                               alphas ? mesh.colors[4 * v + 3] / 255.0f : 1.0f});
     }
     uploadTextures();
     m_vertices.bind();
@@ -481,12 +506,12 @@ void ModelCanvas::applyPose()
     if (m_rest.empty())
         return;
     std::vector<float> posed = m_rest;
-    const std::size_t count = std::min(m_influences.size(), posed.size() / 8);
+    const std::size_t count = std::min(m_influences.size(), posed.size() / kFloats);
     for (std::size_t v = 0; v < count; ++v) {
         const Influence& in = m_influences[v];
         if (in.bone[0] < 0)
             continue;
-        float* out = &posed[8 * v];
+        float* out = &posed[kFloats * v];
         const std::array<float, 3> p{out[0], out[1], out[2]}, n{out[3], out[4], out[5]};
         std::array<float, 3> sp{}, sn{};
         float total = 0;
@@ -528,28 +553,105 @@ void ModelCanvas::uploadTextures()
         return;
     m_glTextures.assign(m_mesh->textures.size(), 0);
     m_textureAlpha.assign(m_mesh->textures.size(), false);
+    const bool dxt = context()->hasExtension(QByteArrayLiteral("GL_EXT_texture_compression_s3tc"));
     for (std::size_t t = 0; t < m_mesh->textures.size(); ++t) {
-        const Image& image = m_mesh->textures[t].image;
-        if (image.width == 0 || image.height == 0 || image.rgba.size() < std::size_t{image.width} * image.height * 4)
+        const Mesh::Texture& texture = m_mesh->textures[t];
+        if (texture.image.width == 0 && !texture.stored.data.empty()) {
+            if (dxt && uploadCompressed(t, texture.stored))
+                continue;
+            // No DXT support in the driver: decode the largest level instead.
+            if (auto picture = mesh::textureImage(texture))
+                uploadImage(t, *picture);
             continue;
-        for (std::size_t i = 3; i < image.rgba.size(); i += 4)
-            if (image.rgba[i] < 250) {
-                m_textureAlpha[t] = true;
-                break;
-            }
-        glGenTextures(1, &m_glTextures[t]);
-        glBindTexture(GL_TEXTURE_2D, m_glTextures[t]);
-        // Rows top first, as the game's texture coordinates expect (v down).
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, static_cast<GLsizei>(image.width), static_cast<GLsizei>(image.height), 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data());
-        glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); // tyre treads and the like tile
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        }
+        uploadImage(t, texture.image);
     }
     glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void ModelCanvas::uploadImage(std::size_t t, const Image& image)
+{
+    if (image.width == 0 || image.height == 0 || image.rgba.size() < std::size_t{image.width} * image.height * 4)
+        return;
+    for (std::size_t i = 3; i < image.rgba.size(); i += 4)
+        if (image.rgba[i] < 250) {
+            m_textureAlpha[t] = true;
+            break;
+        }
+    glGenTextures(1, &m_glTextures[t]);
+    glBindTexture(GL_TEXTURE_2D, m_glTextures[t]);
+    // Rows top first, as the game's texture coordinates expect (v down).
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, static_cast<GLsizei>(image.width), static_cast<GLsizei>(image.height), 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, image.rgba.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+    setTextureSampling();
+}
+
+bool ModelCanvas::uploadCompressed(std::size_t t, const image::Surfaces& s)
+{
+    // GL_COMPRESSED_RGBA_S3TC_DXT1/3/5_EXT
+    GLenum format = 0;
+    switch (s.format) {
+    case image::PixelFormat::BC1: format = 0x83F1; break;
+    case image::PixelFormat::BC2: format = 0x83F2; break;
+    case image::PixelFormat::BC3: format = 0x83F3; break;
+    default: return false;
+    }
+    // See-through pixels: judged on a small level (decoding it is cheap).
+    std::size_t offset = 0;
+    std::uint32_t w = s.width, h = s.height;
+    for (std::uint32_t level = 0; level < s.mipCount; ++level) {
+        const std::size_t size = image::surfaceSize(s.format, w, h);
+        if (offset + size > s.data.size())
+            break;
+        if (level + 1 == s.mipCount || std::max(w, h) <= 32) {
+            if (auto small = image::decodeSurface(ByteSpan(s.data).subspan(offset, size), s.format, w, h))
+                for (std::size_t i = 3; i < small->rgba.size(); i += 4)
+                    if (small->rgba[i] < 250) {
+                        m_textureAlpha[t] = true;
+                        break;
+                    }
+            break;
+        }
+        offset += size;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    glGenTextures(1, &m_glTextures[t]);
+    glBindTexture(GL_TEXTURE_2D, m_glTextures[t]);
+    offset = 0;
+    w = s.width;
+    h = s.height;
+    GLint levels = 0;
+    for (std::uint32_t level = 0; level < s.mipCount; ++level) {
+        const std::size_t size = image::surfaceSize(s.format, w, h);
+        if (offset + size > s.data.size())
+            break;
+        glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level), format, static_cast<GLsizei>(w),
+                               static_cast<GLsizei>(h), 0, static_cast<GLsizei>(size), s.data.data() + offset);
+        ++levels;
+        offset += size;
+        w = std::max(1u, w / 2);
+        h = std::max(1u, h / 2);
+    }
+    if (levels == 0) {
+        glDeleteTextures(1, &m_glTextures[t]);
+        m_glTextures[t] = 0;
+        return false;
+    }
+    constexpr GLenum kMaxLevel = 0x813D; // GL_TEXTURE_MAX_LEVEL: the stored chain may stop short of 1x1
+    glTexParameteri(GL_TEXTURE_2D, kMaxLevel, levels - 1);
+    setTextureSampling();
+    return true;
+}
+
+void ModelCanvas::setTextureSampling()
+{
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); // tyre treads and the like tile
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
 QMatrix4x4 ModelCanvas::viewMatrix() const
@@ -570,6 +672,7 @@ void ModelCanvas::bindVertices(QOpenGLBuffer& buffer)
     m_program.setAttributeBuffer(0, GL_FLOAT, 0, 3, kStride);
     m_program.setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(float), 3, kStride);
     m_program.setAttributeBuffer(2, GL_FLOAT, 6 * sizeof(float), 2, kStride);
+    m_program.setAttributeBuffer(3, GL_FLOAT, 8 * sizeof(float), 1, kStride);
 }
 
 void ModelCanvas::paintGL()
@@ -613,6 +716,7 @@ void ModelCanvas::paintGL()
     m_program.enableAttributeArray(0);
     m_program.enableAttributeArray(1);
     m_program.enableAttributeArray(2);
+    m_program.enableAttributeArray(3);
 
     const auto lodRange = [&](std::size_t part) -> const Mesh::Range* {
         const auto& lods = mesh.parts[part].lods;
@@ -680,7 +784,7 @@ void ModelCanvas::paintGL()
             const int t = m_partTexture[p];
             const bool textured = m_materials && t >= 0 && static_cast<std::size_t>(t) < m_glTextures.size()
                                   && m_glTextures[static_cast<std::size_t>(t)] != 0 && !overlay(p);
-            const AlphaUse use0 = textured ? alphaUse(mesh.parts[p].shader, m_textureAlpha[static_cast<std::size_t>(t)])
+            const AlphaUse use0 = textured ? alphaUse(mesh.parts[p], m_textureAlpha[static_cast<std::size_t>(t)])
                                            : AlphaUse::Opaque;
             QVector3D tint = use0 == AlphaUse::Glow ? effectTint(mesh.parts[p]) : QVector3D(1, 1, 1);
             const bool darken = tint.x() < 0 && tint.y() <= 0 && tint.z() <= 0;
@@ -742,7 +846,7 @@ void ModelCanvas::paintGL()
             if (overlay(p))
                 look.alpha = 0.3f;
             if (const int t = m_partTexture[p]; m_materials && t >= 0 && static_cast<std::size_t>(t) < m_textureAlpha.size()) {
-                const AlphaUse use = alphaUse(part.shader, m_textureAlpha[static_cast<std::size_t>(t)]);
+                const AlphaUse use = alphaUse(part, m_textureAlpha[static_cast<std::size_t>(t)]);
                 if (use == AlphaUse::Blend || use == AlphaUse::Glow)
                     look.alpha = std::min(look.alpha, 0.999f); // drawn after the solid parts
             }
@@ -791,6 +895,7 @@ void ModelCanvas::paintGL()
     m_program.disableAttributeArray(0);
     m_program.disableAttributeArray(1);
     m_program.disableAttributeArray(2);
+    m_program.disableAttributeArray(3);
     m_program.release();
 }
 
@@ -1190,6 +1295,11 @@ void ModelView::step(int frames)
 {
     play(0);
     showFrame(std::round(m_frame) + static_cast<float>(frames));
+}
+
+void ModelView::setCamera(float yaw, float pitch, float zoom, std::optional<QVector3D> target)
+{
+    m_canvas->setCamera(yaw, pitch, zoom, target);
 }
 
 void ModelView::setMesh(std::shared_ptr<const Mesh> mesh)

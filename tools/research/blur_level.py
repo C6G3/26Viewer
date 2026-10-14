@@ -24,6 +24,11 @@ whichever list the reference comes from) of a block.
   * .levelstream  the sections. Scene-node blocks hold a CullNode and zero,
     one or two RenderListNode_Commons; the others hold buffers and textures.
 
+Textures (see docs/formats/blur.md, "Levels"): after a data block's index
+buffers, u32 0 objects, u32 n textures (name, header, level-0 copy = the small
+sizes as a whole mip chain); levels 1-9 each add one larger size. References
+to block 0xFFFFFFFF name the render file's own textures (shared_textures).
+
 A render list draws its `static` geometry as it is (already in world space)
 and its `geometry` through `draws`: each draw names a geometry and an
 "Instance" value set (in `values`) whose g_mWorld places it. A geometry's
@@ -262,6 +267,120 @@ def node_block(d, p):
     return objs, r.p
 
 
+# ---- table of contents, data blocks and textures ------------------------------------------
+
+def section_table(rd, stream_size):
+    """[(offset, size, [(block, level)])] from the render file's Scene (searched from the end)."""
+    p = len(rd)
+    while True:
+        p = rd.rfind(b'RA\x03\x00RA\x00\x00', 0, p)
+        if p < 0:
+            return None
+        if rd[p + 12:p + 16] != b'RA\x01\x00':
+            continue
+        try:
+            r = R(rd, p); r.ra(); r.ra(); out = []; end = 0
+            for _ in range(r.u32()):
+                r.ra(); bounds(r)
+                r.ra(); blocks = []
+                for _ in range(r.u32()):
+                    r.ra(); blocks.append((r.u32(), r.u32()))
+                for _ in range(3):
+                    r.ra(); k = r.u32(); r.p += 4 * k
+                off, size, _used = struct.unpack_from('<QQQ', rd, r.p); r.p += 24
+                if off < end or off + size > stream_size:
+                    raise ValueError('section out of order')
+                end = off + size
+                out.append((off, size, blocks))
+            return out
+        except (ValueError, struct.error):
+            continue
+
+
+def block_offsets(d, table):
+    """{(block, level): header offset} and {header offset: its section's ARCH start}."""
+    where, arch = {}, {}
+    for off, size, blocks in table:
+        cur = off
+        for b, level in blocks:
+            q = d.find(b'RA\x00\x00RA\x00\x00' + struct.pack('<II', 2, level), cur, off + size)
+            where[(b, level)] = q; arch[q] = off; cur = q + 16
+    return where, arch
+
+
+def blob(r, arch):
+    """RA 0, u32 size, u32 16, zero padding to 16 bytes from the ARCH start. (start, size)"""
+    at = r.p; r.ra(); size = r.u32(); r.u32()
+    rel = at + 12 + 5 - arch
+    start = arch + rel + (16 - rel % 16) % 16
+    r.p = start + size
+    return start, size
+
+
+def texture_copy(r, arch):
+    """u32 present; u32 28, width, height, depth, mips, FourCC, -1, 3, blob."""
+    if not r.u32():
+        return None
+    _k, w, h, _depth, mips = (r.u32() for _ in range(5))
+    fourcc = r.raw(4); r.raw(8)
+    return {'w': w, 'h': h, 'mips': mips, 'fourcc': fourcc, 'data': blob(r, arch)}
+
+
+def data_block_textures(d, p, arch):
+    """A data block's level 0: skip its buffers, then [(name, smallest copy)]."""
+    r = R(d, p); r.ra(); r.ra(); r.u32(); r.u32()
+    r.ra()
+    for _ in range(r.u32()):                   # vertex buffers
+        r.u8(); r.ra(); r.ra(); r.u32()
+        r.ra(); n = r.u32(); r.p += 20 * n
+        r.ra(); n = r.u32(); r.p += 2 * n
+        r.u32(); blob(r, arch)
+    r.ra()
+    for _ in range(r.u32()):                   # index buffers
+        r.u8(); r.ra(); r.u32(); r.u32(); blob(r, arch)
+    r.ra()
+    if r.u32():
+        return []
+    out = []
+    for _ in range(r.u32()):
+        r.ra(); r.ra(); r.u32()
+        name = r.str()
+        r.ra(); r.p += 40; r.u32()
+        out.append((name, texture_copy(r, arch)))
+    return out
+
+
+def level_copies(d, p, arch):
+    """Levels 1-9 of a texture block: one larger copy (or None) per texture."""
+    r = R(d, p); r.ra(); r.ra(); r.u32(); r.u32()
+    out = []
+    for _ in range(r.u32()):
+        r.ra(); r.ra(); r.u32()
+        out.append(texture_copy(r, arch))
+    return out
+
+
+def shared_textures(rd):
+    """The render file's own textures: [(name, width, height, layers, mips, FourCC, pixel offset)]."""
+    for m in re.finditer(rb'RA\x00\x00RA\x00\x00\x02\x00\x00\x00', rd):
+        r = R(rd, m.end()); n = r.u32(); out = []
+        try:
+            for _ in range(n):
+                name = r.str(); r.u32(); r.ra(); r.ra(); r.u32()
+                if r.str() != name:
+                    raise ValueError('not a texture list')
+                r.ra(); r.p += 40; r.u32()
+                size = r.u32(); end = r.p + size
+                w, h, layers, mips = (r.u32() for _ in range(4))
+                out.append((name, w, h, layers, mips, r.raw(4), r.p + 8))
+                r.p = end
+        except (ValueError, struct.error, UnicodeDecodeError):
+            continue
+        if n and len(out) == n:
+            return out
+    return []
+
+
 def main():
     folder = sys.argv[1].rstrip('/\\')
     f = open(folder + '/Level.levelstream', 'rb')
@@ -277,6 +396,16 @@ def main():
         for rl in objs[1:]:
             print(hex(p), hex(end), rl['location'], len(rl['static']), 'static', len(rl['geometry']), 'geometry',
                   len(rl['draws']), 'draws', len(rl['ib']), 'IBs', len(rl['vb']), 'VBs', len(rl['textures']), 'textures')
+
+    rd = open(folder + '/Level.levelrender', 'rb').read()
+    table = section_table(rd, len(d))
+    where, arch = block_offsets(d, table)
+    textures = 0
+    for (b, level), p in where.items():
+        if level == 0 and d[p + 45:p + 45 + 23] != b'RenderingData::CullNode':
+            textures += len(data_block_textures(d, p, arch[p]))
+    print('%d sections, %d blocks, %d textures in the stream, %d in the render file'
+          % (len(table), len(where), textures, len(shared_textures(rd))))
 
 
 if __name__ == '__main__':

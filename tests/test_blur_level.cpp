@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -77,8 +78,26 @@ TEST_CASE("Real Blur levels (set BLUR_DIR to enable)")
             INFO(note);
             CHECK(note.find("skipped") == std::string::npos);
         }
-        if (entry.path().filename() == "uk_brighton")
+        // Textures: nearly every drawn triangle has its colour texture, each
+        // with its mip chain put back together (largest first, down to 1x1).
+        std::size_t textured = 0, bytes = 0;
+        for (const Mesh::Part& part : mesh->parts)
+            if (std::ranges::any_of(part.textures, [](const Mesh::TextureSlot& t) { return t.texture >= 0; }))
+                textured += part.lods[0].indexCount / 3;
+        for (const Mesh::Texture& t : mesh->textures) {
+            bytes += t.stored.data.size();
+            CHECK(t.stored.data.size() == image::chainSize(t.stored.format, t.stored.width, t.stored.height,
+                                                           t.stored.mipCount));
+            if (t.stored.width >= 8 && t.stored.height >= 8) // (a few 4x4 ones store only 1-2 sizes)
+                CHECK(t.stored.mipCount == image::fullMipCount(t.stored.width, t.stored.height));
+        }
+        INFO(std::format("{} textures, {} MB", mesh->textures.size(), bytes >> 20));
+        CHECK(textured > mesh->triangleCount() * 9 / 10);
+        CHECK(mesh->colors.size() == 4 * mesh->vertexCount());
+        if (entry.path().filename() == "uk_brighton") {
             CHECK(mesh->triangleCount() > 4'500'000);
+            CHECK(mesh->textures.size() > 1000);
+        }
         ++levels;
     }
     CHECK(levels >= 19);

@@ -44,6 +44,10 @@ struct Mesh {
         bool collision = false;  ///< A collision shape (what the game's physics touches; never drawn by the game).
         bool startHidden = false; ///< Unticked when the model opens (e.g. a level's other route layouts).
         std::uint32_t color = 0; ///< 0xRRGGBB to draw it in, or 0 for the viewer's own colours.
+        /// How its texture's alpha is used, when the file says so (Blur levels'
+        /// render states); Unknown: the viewer judges by the effect's name.
+        enum class Alpha { Unknown, Opaque, CutOut, Blend };
+        Alpha alpha = Alpha::Unknown;
         std::vector<TextureSlot> textures; ///< The material's textures, as the game binds them.
         std::vector<Constant> constants;   ///< The material's other settings.
         /// Skinned parts: the bone each of its vertices' bone slots means (slot i →
@@ -61,12 +65,19 @@ struct Mesh {
     /// A texture stored in the model file itself.
     struct Texture {
         std::string name; ///< "audis3_1"
-        Image image;      ///< Most detailed level.
+        Image image;      ///< Most detailed level (empty when `stored` holds the pixels).
+        /// The game's own compressed pixels, every mip level, for files with
+        /// thousands of textures (a level): uploaded as they are instead of
+        /// being decoded. Empty when `image` is set. See mesh::textureImage.
+        image::Surfaces stored;
     };
 
     std::vector<float> positions;       ///< x, y, z per vertex.
     std::vector<float> normals;         ///< x, y, z per vertex (unit length), or empty.
     std::vector<float> uvs;             ///< u, v per vertex (first UV set; v down, as in Direct3D), or empty.
+    /// r, g, b, a per vertex (0-255), or empty. Blur levels: alpha fades
+    /// blended decals (painted lines) out at their edges.
+    std::vector<std::uint8_t> colors;
     /// Skinning, or empty: four bone slots per vertex (into its part's palette)
     /// and their four weights (adding up to 1).
     std::vector<std::uint8_t> boneSlots;
@@ -119,6 +130,9 @@ namespace mesh {
 /// when the mesh has them. Left-handed models are mirrored so they open the
 /// right way round in Blender and other right-handed tools.
 [[nodiscard]] std::string toObj(const Mesh& mesh);
+
+/// A texture's picture: its image, or its stored pixels' largest level decoded.
+[[nodiscard]] Result<Image> textureImage(const Mesh::Texture& texture);
 
 /// Where a decoded 3D file is exported: "car.model" → "car.obj"; other formats
 /// keep their extension ("Level.levelphysics.obj"), as one folder can hold

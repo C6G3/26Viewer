@@ -50,6 +50,17 @@ float halfToFloat(std::uint16_t h) noexcept
     return std::bit_cast<float>(sign | ((exponent + 112) << 23) | (mantissa << 13));
 }
 
+Result<Image> textureImage(const Mesh::Texture& texture)
+{
+    if (texture.image.width != 0 || texture.stored.data.empty())
+        return texture.image;
+    const image::Surfaces& s = texture.stored;
+    const std::size_t top = image::surfaceSize(s.format, s.width, s.height);
+    if (s.data.size() < top)
+        return fail(ErrorCode::InvalidFormat, "texture {} is shorter than its largest level", texture.name);
+    return image::decodeSurface(ByteSpan(s.data).first(top), s.format, s.width, s.height);
+}
+
 std::filesystem::path objPath(const std::filesystem::path& source)
 {
     std::filesystem::path out = source;
