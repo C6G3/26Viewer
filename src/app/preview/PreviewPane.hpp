@@ -18,6 +18,7 @@ namespace viewer::app {
 
 class BackupBanner;
 class BusyOverlay;
+class HexPanel;
 class HexView;
 class ImageView;
 class FontView;
@@ -100,7 +101,8 @@ private:
     VideoView* m_video;
     TextView* m_text;
     QTreeWidget* m_structure;
-    HexView* m_hex;
+    HexPanel* m_hexPanel;
+    HexView* m_hex; ///< m_hexPanel's dump.
     QTreeWidget* m_properties;
 };
 

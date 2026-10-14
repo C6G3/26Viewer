@@ -34,7 +34,8 @@ system, image decoders, the UI — is shared by every future game module.
   of the tree. Each game remembers its extras for next time; right-click one ▸
   *Close* to remove it.
 - **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`), text,
-  a fast hex view, a **Structure** tab for chunked formats, and a **Properties**
+  a fast hex view (select and copy as hex / C array / text, go to offset, find
+  bytes or text, the 8/16/32-bit and float value at the cursor), a **Structure** tab for chunked formats, and a **Properties**
   tab (compression, offsets, hashes…).
   - **3D models** (Blur `.model`): orbit/pan/zoom, a parts tree to switch parts on
     and off, solid / wireframe / grid / ground shadow, and a level-of-detail picker.

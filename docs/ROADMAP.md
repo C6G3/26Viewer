@@ -53,7 +53,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [ ] Batch replace: drop a folder whose layout mirrors the archive
 5. [x] Path bar above the list (clickable breadcrumb) and View ▸ Go to Path… (`Ctrl+L`): type or paste
    a path (backslashes, a full disk path into the game folder), suggestions as you type
-6. [ ] Hex view: selection, copy as hex/C array, go-to-offset, find bytes
+6. [x] Hex view: cursor and selection (mouse, Shift+arrows), copy as hex / C array / text, go to offset
+   (`Ctrl+G`; decimal or hex), find bytes or "text" (`Ctrl+F`, `F3`), value read-out at the cursor
 7. [ ] Image view: channel toggles (R/G/B/A), mip selector, export as PNG
 8. [x] Export converted formats (sound banks → .wav folders, models → .obj, textures →
    .png/.dds/.jpg/.bmp) and Import back (.wav folder → bank, picture → texture with DXT1/3/5

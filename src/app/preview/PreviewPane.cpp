@@ -370,7 +370,8 @@ PreviewPane::PreviewPane(QWidget* parent)
       m_banner(new BackupBanner(this)), m_tabs(new QTabWidget(this)),
       m_previewStack(new QStackedWidget(this)), m_message(new QLabel(this)), m_image(new ImageView(this)),
       m_model(new ModelView(this)), m_fontView(new FontView(this)), m_bankView(new SoundBankView(this)), m_video(new VideoView(this)),
-      m_text(new TextView(this)), m_structure(new QTreeWidget(this)), m_hex(new HexView(this)),
+      m_text(new TextView(this)), m_structure(new QTreeWidget(this)),
+      m_hexPanel(new HexPanel(this)), m_hex(m_hexPanel->view()),
       m_properties(new QTreeWidget(this))
 {
     // Header
@@ -419,7 +420,7 @@ PreviewPane::PreviewPane(QWidget* parent)
     m_tabs->setDocumentMode(true);
     m_tabs->addTab(m_previewStack, tr("Preview"));
     m_tabs->addTab(m_structure, tr("Structure"));
-    m_tabs->addTab(m_hex, tr("Hex"));
+    m_tabs->addTab(m_hexPanel, tr("Hex"));
     m_tabs->addTab(m_properties, tr("Properties"));
     connect(m_tabs->tabBar(), &QTabBar::tabBarClicked, this, [this](int index) {
         if (index >= 0)
