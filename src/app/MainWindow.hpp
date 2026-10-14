@@ -16,6 +16,7 @@
 class QAbstractItemView;
 class QAction;
 class QLabel;
+class QMenu;
 class QMimeData;
 class QLineEdit;
 class QProgressBar;
@@ -78,6 +79,8 @@ public:
     /// Automation runs (--screenshot) pass false so they don't overwrite the
     /// user's remembered session.
     void setRememberSession(bool remember) noexcept { m_rememberSession = remember; }
+    /// Automation (--screenshot --dialog): opens "goto", "recent" or "settings".
+    void showForScreenshot(const QString& name);
     /// Automation (--screenshot): preview windows are rendered off-screen too.
     void setOffscreen(bool offscreen) noexcept { m_offscreen = offscreen; }
 
@@ -135,6 +138,9 @@ private:
     [[nodiscard]] QString locationOf(const VfsNode* node) const;
     [[nodiscard]] const VfsNode* findLocation(const QString& location) const;
     [[nodiscard]] std::vector<PreviewWindow*> previewWindows() const;
+    /// View ▸ Go to Path… (Ctrl+L): type or paste a path (suggestions as you
+    /// type) and jump there.
+    void goToPath();
 
     // Text editing (TextEditorWindow)
     /// Whether `node` can be opened in the text editor; with `sniff`, files of
@@ -189,6 +195,10 @@ private:
     const VfsNode* dropTarget(const QAbstractItemView* view, const QPoint& pos, const QMimeData* mime,
                               QString* reason) const;
     void rememberSession() const;
+    /// File ▸ Open Recent: games, archives and folders opened lately (newest
+    /// first, at most kRecentCount), kept in the settings file.
+    void addRecent(const QString& kind, const QString& gameId, const std::filesystem::path& path) const;
+    void populateRecentMenu();
     /// Shows/hides the red "not backed up" banners (folder list and preview windows).
     void updateBackupBanner();
     /// Backs up `node`'s archive (or loose file) in the background.
@@ -245,6 +255,7 @@ private:
     QAction* m_restoreAction = nullptr;
     QAction* m_editTextAction = nullptr;
     QAction* m_reopenAction = nullptr;
+    QMenu* m_recentMenu = nullptr;
     QAction* m_editModeAction = nullptr;
     QAction* m_backAction = nullptr;
     QAction* m_openAction = nullptr;

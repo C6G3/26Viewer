@@ -36,7 +36,7 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Confirm the CI workflow (`.github/workflows/build.yml`) passes on GitHub Actions
 3. [x] Windows resources: `.ico` app icon (rendered from SVG at build time by `tools/icongen`) + VERSIONINFO
 4. [x] Reopen the last game + selection at start-up (settings in `%APPDATA%\26Viewer\26Viewer.ini`)
-   - [ ] Recent games / recent archives menu (File ▸ Recent)
+   - [x] Recent games / archives / folders menu (File ▸ Open Recent, ten entries, missing ones greyed)
 4a. [x] OpenIV-style browsing: folder/archive tree → contents list → double-click to preview,
    Backspace back, clickable path bar, search within the open folder, Properties (`Alt+Enter`)
    - [x] Previews open in their own windows (toolbar for per-file tools, drop-to-replace)
@@ -51,7 +51,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
      Restore Original on a file inside an archive puts back just that file
    - [ ] Test replaced Blur files in-game (normal archives, signed gamedata archives)
    - [ ] Batch replace: drop a folder whose layout mirrors the archive
-5. [ ] Status-bar breadcrumb and "Go to path…" (`Ctrl+L`) using `MainWindow::selectPath`
+5. [x] Path bar above the list (clickable breadcrumb) and View ▸ Go to Path… (`Ctrl+L`): type or paste
+   a path (backslashes, a full disk path into the game folder), suggestions as you type
 6. [ ] Hex view: selection, copy as hex/C array, go-to-offset, find bytes
 7. [ ] Image view: channel toggles (R/G/B/A), mip selector, export as PNG
 8. [x] Export converted formats (sound banks → .wav folders, models → .obj, textures →

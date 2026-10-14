@@ -21,13 +21,17 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QCompleter>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QEventLoop>
 #include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QHash>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -281,6 +285,8 @@ void MainWindow::buildActions()
     file->addAction(m_openGameAction);
     file->addAction(m_openArchiveAction);
     file->addAction(m_openFolderAction);
+    m_recentMenu = file->addMenu(icons::theme(TI::DocumentOpenRecent, QStyle::SP_DirOpenIcon), tr("Open &Recent"));
+    connect(m_recentMenu, &QMenu::aboutToShow, this, &MainWindow::populateRecentMenu);
     file->addSeparator();
     file->addAction(m_extractAction);
     file->addAction(m_extractAllAction);
@@ -320,9 +326,15 @@ void MainWindow::buildActions()
         m_treeFilter->setContainersOnly(!on);
     });
 
+    auto* goTo = new QAction(icons::theme(TI::GoNext, QStyle::SP_DirLinkIcon), tr("&Go to Path…"), this);
+    goTo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_L));
+    goTo->setStatusTip(tr("Type or paste a path inside the open game or archives and jump to it"));
+    connect(goTo, &QAction::triggered, this, &MainWindow::goToPath);
+
     QMenu* view = menuBar()->addMenu(tr("&View"));
     view->addAction(showFiles);
     view->addSeparator();
+    view->addAction(goTo);
     view->addAction(m_backAction);
     view->addAction(m_propertiesAction);
     view->addSeparator();
@@ -704,6 +716,8 @@ void MainWindow::onMountFinished()
         m_statusLabel->setText(tr("Opened %1  ·  %n file(s)", nullptr, static_cast<int>(extra.top->fileCount()))
                                    .arg(toQString(extra.source.filename())));
         rememberSession();
+        std::error_code ec;
+        addRecent(std::filesystem::is_directory(extra.source, ec) ? "folder" : "archive", {}, extra.source);
     }
     updateActions();
 }
@@ -844,6 +858,96 @@ const VfsNode* MainWindow::findLocation(const QString& location) const
         if (extra->source == source)
             return walk(&extra->vfs->root(), location.mid(bar + 1));
     return nullptr;
+}
+
+void MainWindow::showForScreenshot(const QString& name)
+{
+    if (name == "goto") {
+        goToPath();
+    } else if (name == "recent") {
+        populateRecentMenu();
+        m_recentMenu->popup(mapToGlobal(QPoint(40, 40)));
+    }
+}
+
+void MainWindow::goToPath()
+{
+    if (!m_session)
+        return;
+    // Every path, as typed: the main mount's virtual paths, then the extra
+    // mounts' under their own names ("mymod.pak/models/…").
+    QStringList paths;
+    QHash<QString, QString> locations; // lower-case path as shown → location for selectPath
+    const auto collect = [&](const VfsNode& root, const QString& prefix, const QString& source) {
+        std::vector<const VfsNode*> stack{&root};
+        while (!stack.empty()) {
+            const VfsNode* node = stack.back();
+            stack.pop_back();
+            for (const auto& child : node->children())
+                stack.push_back(child.get());
+            if (node == &root)
+                continue;
+            const QString path = toQString(node->virtualPath());
+            const QString shown = prefix.isEmpty() ? path : prefix + QLatin1Char('/') + path;
+            paths << shown;
+            locations.insert(shown.toLower(), source.isEmpty() ? path : source + QLatin1Char('|') + path);
+        }
+    };
+    collect(m_session->vfs.root(), {}, {});
+    for (const auto& extra : m_session->extras)
+        collect(extra->vfs->root(), toQString(extra->source.filename()), toQString(extra->source));
+    paths.sort(Qt::CaseInsensitive);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Go to Path"));
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* hint = new QLabel(tr("A folder or file inside %1 — a path from Copy Path, typed or pasted:")
+                                .arg(m_session->title()),
+                            &dialog);
+    hint->setWordWrap(true);
+    auto* line = new QLineEdit(&dialog);
+    line->setClearButtonEnabled(true);
+    line->setMinimumWidth(520);
+    if (const VfsNode* here = m_folderView->folder())
+        line->setText(toQString(here->virtualPath()));
+    line->selectAll();
+    auto* completer = new QCompleter(paths, line);
+    completer->setCaseSensitivity(Qt::CaseInsensitive);
+    completer->setFilterMode(Qt::MatchContains);
+    completer->setMaxVisibleItems(14);
+    line->setCompleter(completer);
+    auto* problem = new QLabel(&dialog);
+    problem->setStyleSheet(QStringLiteral("color: palette(link)"));
+    problem->hide();
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Go"));
+    layout->addWidget(hint);
+    layout->addWidget(line);
+    layout->addWidget(problem);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        // Backslashes, quotes and a full disk path into the game folder are fine.
+        QString path = line->text().trimmed();
+        if (path.size() >= 2 && path.startsWith(QLatin1Char('"')) && path.endsWith(QLatin1Char('"')))
+            path = path.mid(1, path.size() - 2);
+        path = QDir::fromNativeSeparators(path);
+        const QString base = QDir::fromNativeSeparators(toQString(m_session->source));
+        if (path.startsWith(base + QLatin1Char('/'), Qt::CaseInsensitive))
+            path = path.mid(base.size() + 1);
+        while (path.endsWith(QLatin1Char('/')))
+            path.chop(1);
+        while (path.startsWith(QLatin1Char('/')))
+            path.remove(0, 1);
+        const QString location = locations.value(path.toLower(), path);
+        if (selectPath(location)) {
+            dialog.accept();
+            return;
+        }
+        problem->setText(tr("Nothing is at “%1”.").arg(path));
+        problem->show();
+    });
+    dialog.exec();
 }
 
 bool MainWindow::selectPath(const QString& location, bool openFile)
@@ -1094,6 +1198,83 @@ void MainWindow::rememberSession() const
     for (const auto& path : m_session->extraSources())
         extras << toQString(path);
     settings.setValue(extrasKey(m_session->game), extras);
+    addRecent(m_session->game ? "game" : folder ? "folder" : "archive",
+              m_session->game ? toQString(m_session->game->info().id) : QString(), m_session->source);
+}
+
+namespace {
+
+constexpr int kRecentCount = 10;
+
+/// One remembered entry: "kind|game id|path" (kind: game, archive or folder).
+struct RecentEntry {
+    QString kind, gameId, path;
+
+    static std::optional<RecentEntry> parse(const QString& text)
+    {
+        const QStringList parts = text.split(QLatin1Char('|'));
+        if (parts.size() != 3 || parts[2].isEmpty())
+            return std::nullopt;
+        return RecentEntry{parts[0], parts[1], parts[2]};
+    }
+    [[nodiscard]] QString text() const { return kind + QLatin1Char('|') + gameId + QLatin1Char('|') + path; }
+};
+
+} // namespace
+
+void MainWindow::addRecent(const QString& kind, const QString& gameId, const std::filesystem::path& path) const
+{
+    if (!m_rememberSession)
+        return;
+    QSettings settings;
+    const RecentEntry entry{kind, gameId, QDir::cleanPath(toQString(path))};
+    QStringList list = settings.value("recent/items").toStringList();
+    list.removeIf([&](const QString& item) {
+        const auto e = RecentEntry::parse(item);
+        return !e || QDir::cleanPath(e->path).compare(entry.path, Qt::CaseInsensitive) == 0;
+    });
+    list.prepend(entry.text());
+    while (list.size() > kRecentCount)
+        list.removeLast();
+    settings.setValue("recent/items", list);
+}
+
+void MainWindow::populateRecentMenu()
+{
+    m_recentMenu->clear();
+    const QStringList list = QSettings().value("recent/items").toStringList();
+    int number = 0;
+    for (const QString& item : list) {
+        const auto entry = RecentEntry::parse(item);
+        if (!entry)
+            continue;
+        const Game* game = entry->kind == "game" ? m_games.find(entry->gameId.toStdString()) : nullptr;
+        if (entry->kind == "game" && !game)
+            continue;
+        const QString name = game ? toQString(game->info().title) : QFileInfo(entry->path).fileName();
+        const QString where = QDir::toNativeSeparators(entry->path);
+        // "&1  Blur — F:/Games/BLUR": numbered for the keyboard (&& shows a literal &).
+        QString label = name == where ? name : tr("%1 — %2").arg(name, where);
+        label.replace(QLatin1Char('&'), QStringLiteral("&&"));
+        QAction* action = m_recentMenu->addAction(++number < 10 ? QStringLiteral("&%1  %2").arg(number).arg(label)
+                                                                : label);
+        action->setEnabled(QFileInfo::exists(entry->path));
+        if (!action->isEnabled())
+            action->setToolTip(tr("Not found"));
+        connect(action, &QAction::triggered, this, [this, game, path = entry->path] {
+            if (game)
+                openGame(*game, toPath(path));
+            else
+                openPath(path);
+        });
+    }
+    if (m_recentMenu->isEmpty()) {
+        m_recentMenu->addAction(tr("(nothing yet)"))->setEnabled(false);
+        return;
+    }
+    m_recentMenu->addSeparator();
+    connect(m_recentMenu->addAction(tr("&Clear Recent")), &QAction::triggered, this,
+            [] { QSettings().remove("recent/items"); });
 }
 
 bool MainWindow::reopenLastSession()

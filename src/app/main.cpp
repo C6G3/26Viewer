@@ -25,6 +25,7 @@ struct Options {
     QString theme;
     QString animation; ///< Virtual path of an animation to pose the model with ("path@frame").
     QString camera;    ///< --camera: "yaw,pitch,zoom[,x,y,z]".
+    QString dialog;    ///< --dialog: a window or menu to picture instead (goto, recent, settings).
     int tab = -1;
     bool editMode = false;
 };
@@ -60,7 +61,10 @@ Options parseArguments(const QApplication& app)
                                        QStringLiteral("Pose the selected model with this animation (virtual path, "
                                                       "optionally @frame)."),
                                        QStringLiteral("path"));
-    parser.addOptions({select, tab, theme, screenshot, editMode, animation, camera});
+    const QCommandLineOption dialog(QStringLiteral("dialog"),
+                                    QStringLiteral("Screenshot of a dialog or menu instead: goto, recent or settings."),
+                                    QStringLiteral("name"));
+    parser.addOptions({select, tab, theme, screenshot, editMode, animation, camera, dialog});
     parser.process(app);
 
     Options o;
@@ -71,6 +75,7 @@ Options parseArguments(const QApplication& app)
     o.editMode = parser.isSet(editMode);
     o.animation = parser.value(animation);
     o.camera = parser.value(camera);
+    o.dialog = parser.value(dialog).toLower();
     const QStringList tabs{"preview", "structure", "hex", "properties", "edit", "textures", "animations"};
     o.tab = tabs.indexOf(parser.value(tab).toLower());
     return o;
@@ -88,6 +93,22 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
     };
     constexpr int kEditTab = 4, kTexturesTab = 5, kAnimationsTab = 6;
     QObject::connect(&window, &viewer::app::MainWindow::sessionChanged, &window, [&window, o, capture] {
+        if (!o.dialog.isEmpty()) { // the dialog (or menu) itself, once it is up
+            if (!o.select.isEmpty())
+                window.selectPath(o.select, /*openFile=*/false);
+            QTimer::singleShot(1200, &window, [file = o.screenshot] {
+                QWidget* shown = QApplication::activeModalWidget();
+                if (!shown)
+                    shown = QApplication::activePopupWidget();
+                if (shown) {
+                    shown->grab().save(file);
+                    shown->close();
+                }
+                QApplication::quit();
+            });
+            QTimer::singleShot(0, &window, [&window, name = o.dialog] { window.showForScreenshot(name); });
+            return;
+        }
         auto opened = std::make_shared<bool>(false);
         QObject::connect(&window, &viewer::app::MainWindow::previewOpened, &window,
                          [&window, o, capture, opened](viewer::app::PreviewWindow* preview) {

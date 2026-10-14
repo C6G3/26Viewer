@@ -22,8 +22,10 @@ system, image decoders, the UI — is shared by every future game module.
   folder; the list on the right shows what's inside the selected folder or
   archive. **Double-click** (or `Enter`) enters a folder or opens a file;
   **Backspace** goes up. The path bar above the list is clickable, and **search**
-  (`Ctrl+F`) finds files anywhere below the open folder. *View ▸ Show Files in
-  Tree* switches the tree between everything and folders/archives only.
+  (`Ctrl+F`) finds files anywhere below the open folder. *View ▸ Go to Path…*
+  (`Ctrl+L`) jumps to a path you type or paste, with suggestions as you type.
+  *File ▸ Open Recent* lists the last games, archives and folders. *View ▸ Show
+  Files in Tree* switches the tree between everything and folders/archives only.
 - **Preview windows**: each file opens in its own window (several at once, any
   monitor) with Preview / Structure / Hex / Properties tabs and a toolbar for
   per-file tools (Show in List, Extract, Replace — or drop a file on the window).
