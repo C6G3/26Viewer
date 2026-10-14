@@ -45,6 +45,7 @@ struct PreviewResult {
     QImage image;
     QString imageInfo;
     QString imageError;
+    std::shared_ptr<const image::Surfaces> surfaces; ///< A texture's stored mip levels / layers.
 
     std::optional<StructureNode> structure;
     QString structureError;
@@ -272,6 +273,10 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
                                .arg(QObject::tr("%n mip(s)", nullptr, static_cast<int>(img->mipCount)));
             if (img->layers > 1)
                 r->imageInfo += QObject::tr("  ·  %n layer(s)", nullptr, static_cast<int>(img->layers));
+            // The other levels, for the mip and face pickers (decoded only when picked).
+            if (img->mipCount > 1 || img->layers > 1)
+                if (auto surfaces = decoder->surfaces(span))
+                    r->surfaces = std::make_shared<const image::Surfaces>(std::move(*surfaces));
         } else {
             r->imageError = toQString(img.error().message);
         }
@@ -564,7 +569,8 @@ void PreviewPane::applyResult(const PreviewResult& result)
         m_fontView->setTypeface(result.font);
         m_previewStack->setCurrentWidget(m_fontView);
     } else if (!result.image.isNull()) {
-        m_image->setImage(result.image, result.imageInfo);
+        m_image->setImage(result.image, result.imageInfo, m_title->text());
+        m_image->setSurfaces(result.surfaces);
         m_previewStack->setCurrentWidget(m_image);
     } else if (result.hasText) {
         const int lines = static_cast<int>(result.text.count(QLatin1Char('\n')) + 1);

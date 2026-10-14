@@ -221,3 +221,29 @@ TEST_CASE("DDS files written with mips read back unchanged")
     CHECK(image::toD3DFormat(image::PixelFormat::BC1) == 0x31545844);
     CHECK(image::fromD3DFormat(image::toD3DFormat(image::PixelFormat::A8L8)) == image::PixelFormat::A8L8);
 }
+
+TEST_CASE("Each stored mip level and layer decodes on its own")
+{
+    // Two layers of an uncompressed 8x4 chain: level m of layer l is filled with 10 * l + m.
+    image::Surfaces s;
+    s.format = image::PixelFormat::A8;
+    s.width = 8;
+    s.height = 4;
+    s.mipCount = 4;
+    s.layers = 2;
+    for (std::uint8_t l = 0; l < 2; ++l)
+        for (std::uint32_t m = 0; m < 4; ++m)
+            s.data.insert(s.data.end(), image::surfaceSize(s.format, std::max(1u, 8u >> m), std::max(1u, 4u >> m)),
+                          static_cast<std::byte>(10 * l + m));
+    for (std::uint32_t l = 0; l < 2; ++l)
+        for (std::uint32_t m = 0; m < 4; ++m) {
+            auto img = image::decodeLevel(s, l, m);
+            REQUIRE(img);
+            CHECK(img->width == std::max(1u, 8u >> m));
+            CHECK(img->height == std::max(1u, 4u >> m));
+            CHECK(img->rgba[0] == 10 * l + m); // A8 is shown as a grey mask
+            CHECK(img->rgba[img->rgba.size() - 4] == 10 * l + m);
+        }
+    CHECK_FALSE(image::decodeLevel(s, 0, 4));
+    CHECK_FALSE(image::decodeLevel(s, 2, 0));
+}

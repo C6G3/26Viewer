@@ -33,7 +33,8 @@ system, image decoders, the UI — is shared by every future game module.
   that game, or any folder (a mod workspace, say), as extra entries at the top
   of the tree. Each game remembers its extras for next time; right-click one ▸
   *Close* to remove it.
-- **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`), text,
+- **Previews**: textures (DDS, BC1–BC5, raw D3D formats, Blur `.texture`) with
+  R/G/B/A channel toggles, mip level and cube face pickers and Save PNG, text,
   a fast hex view (select and copy as hex / C array / text, go to offset, find
   bytes or text, the 8/16/32-bit and float value at the cursor), a **Structure** tab for chunked formats, and a **Properties**
   tab (compression, offsets, hashes…).

@@ -372,7 +372,8 @@ void TextureBrowser::showCurrent()
     m_view->setImage(e.image, QStringLiteral("%1 × %2  ·  %3")
                                   .arg(e.info.width)
                                   .arg(e.info.height)
-                                  .arg(toQString(image::pixelFormatName(e.info.format))));
+                                  .arg(toQString(image::pixelFormatName(e.info.format))),
+                     fileNameFor(e.info.name));
 }
 
 std::vector<int> TextureBrowser::selected() const

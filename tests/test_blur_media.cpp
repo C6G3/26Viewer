@@ -774,6 +774,10 @@ TEST_CASE("Every real Blur texture rebuilds byte for byte (set BLUR_DIR to enabl
             }
             auto surfaces = decoder.surfaces(original);
             REQUIRE(surfaces);
+            // Every stored level decodes on its own (the preview's mip / face pickers).
+            for (std::uint32_t l = 0; l < surfaces->layers; ++l)
+                for (std::uint32_t m = 0; m < surfaces->mipCount; ++m)
+                    CHECK(image::decodeLevel(*surfaces, l, m));
             auto rebuilt = decoder.rebuild(original, *surfaces);
             REQUIRE(rebuilt);
             CHECK(*rebuilt == original);

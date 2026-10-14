@@ -43,7 +43,7 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Game's .exe icon on the tree's top node; optional files in the tree
    - [x] Open archives / any folder alongside the game (extra top-level entries, remembered per game)
    - [x] Per-file Export / Import buttons in the preview window
-   - [ ] Per-file tools in the preview window: image channels, mip selector
+   - [x] Per-file tools in the preview window: image channels, mip selector (item 7)
 4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
    - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
    - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups
@@ -55,7 +55,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    a path (backslashes, a full disk path into the game folder), suggestions as you type
 6. [x] Hex view: cursor and selection (mouse, Shift+arrows), copy as hex / C array / text, go to offset
    (`Ctrl+G`; decimal or hex), find bytes or "text" (`Ctrl+F`, `F3`), value read-out at the cursor
-7. [ ] Image view: channel toggles (R/G/B/A), mip selector, export as PNG
+7. [x] Image view: channel toggles (R/G/B/A; one alone shows as grey, Ctrl+click solos), mip level and
+   cube face pickers (stored levels decoded on demand), Save PNG of exactly what is shown
 8. [x] Export converted formats (sound banks → .wav folders, models → .obj, textures →
    .png/.dds/.jpg/.bmp) and Import back (.wav folder → bank, picture → texture with DXT1/3/5
    or uncompressed, the original format by default; DXT encoder in core)

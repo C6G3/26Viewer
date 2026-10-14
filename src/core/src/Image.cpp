@@ -327,6 +327,25 @@ Result<Image> decodeSurface(ByteSpan pixels, PixelFormat format, std::uint32_t w
     return img;
 }
 
+Result<Image> decodeLevel(const Surfaces& surfaces, std::uint32_t layer, std::uint32_t mip)
+{
+    if (layer >= surfaces.layers || mip >= surfaces.mipCount)
+        return fail(ErrorCode::OutOfBounds, "no level {} of layer {} ({} levels, {} layers)", mip, layer,
+                    surfaces.mipCount, surfaces.layers);
+    const std::size_t offset =
+        chainSize(surfaces.format, surfaces.width, surfaces.height, surfaces.mipCount) * layer
+        + (mip == 0 ? 0 : chainSize(surfaces.format, surfaces.width, surfaces.height, mip));
+    if (offset > surfaces.data.size())
+        return fail(ErrorCode::OutOfBounds, "level {} of layer {} starts past the data", mip, layer);
+    auto img = decodeSurface(ByteSpan(surfaces.data).subspan(offset), surfaces.format,
+                             std::max(1u, surfaces.width >> mip), std::max(1u, surfaces.height >> mip));
+    if (img) {
+        img->mipCount = surfaces.mipCount;
+        img->layers = surfaces.layers;
+    }
+    return img;
+}
+
 Result<Surfaces> readDds(ByteSpan file)
 {
     constexpr std::size_t kHeader = 128;

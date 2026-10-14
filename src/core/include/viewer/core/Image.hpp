@@ -77,6 +77,10 @@ struct Surfaces {
 /// Decodes the top mip of a raw surface into RGBA8.
 Result<Image> decodeSurface(ByteSpan pixels, PixelFormat format, std::uint32_t width, std::uint32_t height);
 
+/// Decodes one stored level of `surfaces`: mip `mip` (0 = largest) of layer
+/// `layer` (cube face / array slice).
+Result<Image> decodeLevel(const Surfaces& surfaces, std::uint32_t layer, std::uint32_t mip);
+
 /// Decodes a complete .dds file (DX9 header and DX10 extended header).
 Result<Image> decodeDds(ByteSpan file);
 
