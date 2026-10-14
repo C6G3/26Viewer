@@ -41,6 +41,30 @@ Result<ReplacePlan> planReplace(const Session& session, const VfsNode& node, con
 Result<ReplacePlan> planReplaceData(const Session& session, const VfsNode& node, ByteBuffer data,
                                     const QString& sourceName);
 
+/// Replace from Folder: the files of a folder laid out like part of the tree,
+/// each matched to the file at the same path (letter case ignored).
+struct BatchReplace {
+    struct Item {
+        const VfsNode* node = nullptr;
+        QString sourceFile;
+    };
+    std::vector<Item> items;
+    QStringList unmatched;  ///< Files in the folder with no counterpart (relative paths).
+    std::vector<std::filesystem::path> targets; ///< Archives / loose files that will change, once each.
+    bool backupFirst = false; ///< Back up targets that have no backup yet, before writing.
+};
+
+/// Matches the files under `folder` to the replaceable files under `target`.
+/// A top folder named like `target` (an extracted copy of it) is looked into.
+/// Only paths are compared here; contents are checked when the job runs.
+[[nodiscard]] BatchReplace planBatchReplace(const VfsNode& target, const std::filesystem::path& folder);
+
+/// Writes a batch on a worker thread: optional backups first, then each file
+/// that passes the planReplace checks. Files identical to what is there now
+/// are left alone (each replacement adds its data to the archive); files that
+/// don't decode like the original are skipped and listed.
+QFuture<EditResult> startBatchReplace(std::shared_ptr<Session> session, BatchReplace batch);
+
 /// The file on disk whose backup protects `node`: its archive, the archive
 /// itself for archive nodes, or the loose file. Empty for folders on disk.
 [[nodiscard]] std::filesystem::path backupTarget(const VfsNode& node);

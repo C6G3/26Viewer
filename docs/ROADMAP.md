@@ -50,7 +50,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Backups kept in `<game>/backup/` (same layout; old `.bak` files still recognised);
      Restore Original on a file inside an archive puts back just that file
    - [ ] Test replaced Blur files in-game (normal archives, signed gamedata archives)
-   - [ ] Batch replace: drop a folder whose layout mirrors the archive
+   - [x] Batch replace: Edit ▸ Replace from Folder (`Ctrl+Shift+R`) matches a folder laid out like the
+     selected folder / archive by path; unchanged files left alone, suspect files skipped and listed
 5. [x] Path bar above the list (clickable breadcrumb) and View ▸ Go to Path… (`Ctrl+L`): type or paste
    a path (backslashes, a full disk path into the game folder), suggestions as you type
 6. [x] Hex view: cursor and selection (mouse, Shift+arrows), copy as hex / C array / text, go to offset

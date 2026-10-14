@@ -180,6 +180,11 @@ private:
 
     // Replacing assets (see AssetEditor)
     void replaceSelected();
+    /// Edit > Replace from Folder: every file of a folder laid out like the
+    /// selected folder / archive replaces the file at the same path.
+    void replaceFromFolder();
+    /// The folder or archive Replace from Folder works on (null: none).
+    [[nodiscard]] const VfsNode* batchTarget() const;
     /// Asks for a replacement file for `node`, then replaces it.
     void replaceWithDialog(const VfsNode* node, QWidget* dialogParent);
     void replaceNode(const VfsNode* node, const QString& file, QWidget* dialogParent = nullptr);
@@ -254,6 +259,7 @@ private:
     QAction* m_copyPathAction = nullptr;
     QAction* m_revealAction = nullptr;
     QAction* m_replaceAction = nullptr;
+    QAction* m_replaceFolderAction = nullptr;
     QAction* m_restoreAction = nullptr;
     QAction* m_editTextAction = nullptr;
     QAction* m_reopenAction = nullptr;

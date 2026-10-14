@@ -80,6 +80,11 @@ system, image decoders, the UI — is shared by every future game module.
   - **Replace assets** with your own files — *Edit ▸ Replace…* (`Ctrl+R`), the
     toolbar button, or drag a file from Explorer onto an item. The file type must
     match; the name inside the archive never changes.
+  - **Replace from Folder** (`Ctrl+Shift+R`) — many files at once: pick a folder
+    laid out like the selected folder or archive (e.g. an extracted copy you
+    edited); each file replaces the one at the same path. Files that are
+    unchanged are left alone, and files that don't decode like the original are
+    skipped and listed.
   - **Import** (`Ctrl+I`) — the reverse of Export: a folder of `.wav` files
     rebuilds a sound bank (files are matched to sounds by name; missing ones stay
     as they were), and a `.png` / `.dds` / `.jpg` / `.bmp` picture becomes a

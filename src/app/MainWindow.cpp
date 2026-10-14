@@ -234,6 +234,14 @@ void MainWindow::buildActions()
                                      "You can also drag a file from Explorer onto an item. Needs Edit Mode."));
     connect(m_replaceAction, &QAction::triggered, this, &MainWindow::replaceSelected);
 
+    m_replaceFolderAction = new QAction(icons::theme(TI::FolderOpen, QStyle::SP_DirOpenIcon),
+                                        tr("Replace from &Folder…"), this);
+    m_replaceFolderAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
+    m_replaceFolderAction->setStatusTip(
+        tr("Replace many files at once from a folder laid out like the selected folder or archive "
+           "(e.g. an extracted copy you edited). Needs Edit Mode."));
+    connect(m_replaceFolderAction, &QAction::triggered, this, &MainWindow::replaceFromFolder);
+
     m_restoreAction = new QAction(icons::theme(TI::EditUndo, QStyle::SP_ArrowBack), tr("Restore &Original…"), this);
     m_restoreAction->setStatusTip(
         tr("Put back the original from the backup: one file inside an archive, or a whole archive / loose file"));
@@ -303,6 +311,7 @@ void MainWindow::buildActions()
     edit->addAction(m_editModeAction);
     edit->addSeparator();
     edit->addAction(m_replaceAction);
+    edit->addAction(m_replaceFolderAction);
     edit->addAction(m_importAction);
     edit->addAction(m_editTextAction);
     edit->addAction(m_restoreAction);
@@ -1393,6 +1402,99 @@ void MainWindow::replaceSelected()
         replaceWithDialog(nodes.front(), this);
 }
 
+const VfsNode* MainWindow::batchTarget() const
+{
+    if (!m_session)
+        return nullptr;
+    const auto nodes = selectedNodes();
+    if (nodes.size() == 1 && !nodes.front()->isFile())
+        return nodes.front();
+    return m_folderView->folder();
+}
+
+void MainWindow::replaceFromFolder()
+{
+    const VfsNode* target = batchTarget();
+    if (!target || !m_editMode || m_editWatcher->isRunning() || m_loadWatcher->isRunning())
+        return;
+    const QString targetName = target == &m_session->vfs.root() ? m_session->title() : toQString(target->name());
+    QSettings settings;
+    const QString folder = QFileDialog::getExistingDirectory(
+        this, tr("Replace files in %1 from the folder").arg(targetName), settings.value("paths/lastReplaceDir").toString());
+    if (folder.isEmpty())
+        return;
+    settings.setValue("paths/lastReplaceDir", folder);
+
+    BatchReplace batch = planBatchReplace(*target, toPath(folder));
+    const QString shownFolder = QDir::toNativeSeparators(folder).toHtmlEscaped();
+    if (batch.items.empty()) {
+        QMessageBox::information(
+            this, tr("Replace from Folder"),
+            tr("No file in <b>%1</b> matches a file in <b>%2</b>.<br><br>Lay the folder out like %2: "
+               "the same sub-folders and file names (e.g. extract the files, edit them, then pick the "
+               "folder they were extracted to).")
+                .arg(shownFolder, targetName.toHtmlEscaped()));
+        return;
+    }
+
+    // Which archives / loose files change, and whether they are backed up.
+    QStringList changed;
+    QStringList notBackedUp;
+    for (const auto& file : batch.targets) {
+        const QString name = toQString(file.filename()).toHtmlEscaped();
+        changed << name;
+        if (findBackup(file, m_session->vfs.backupRoot()).empty())
+            notBackedUp << name;
+    }
+    QString text = tr("Replace <b>%n file(s)</b> in <b>%1</b> with the files from <b>%2</b>?", nullptr,
+                      static_cast<int>(batch.items.size()))
+                       .arg(targetName.toHtmlEscaped(), shownFolder);
+    text += tr("<br><br>Changes: %1").arg(changed.join(QStringLiteral(", ")));
+    if (!batch.unmatched.isEmpty())
+        text += tr("<br>%n file(s) in the folder match nothing and are ignored.", nullptr,
+                   static_cast<int>(batch.unmatched.size()));
+    text += tr("<br>Files that are already the same are left alone.");
+
+    QString details = tr("Replaced:") + QLatin1Char('\n');
+    for (const auto& item : batch.items)
+        details += QStringLiteral("  ") + toQString(item.node->virtualPath()) + QLatin1Char('\n');
+    if (!batch.unmatched.isEmpty()) {
+        details += QLatin1Char('\n') + tr("Ignored (no file at that path):") + QLatin1Char('\n');
+        for (const QString& path : batch.unmatched)
+            details += QStringLiteral("  ") + path + QLatin1Char('\n');
+    }
+
+    QMessageBox box(QMessageBox::Question, tr("Replace from Folder"), QString(), QMessageBox::Cancel, this);
+    QPushButton* replace = nullptr;
+    QPushButton* backupAndReplace = nullptr;
+    if (notBackedUp.isEmpty()) {
+        text += tr("<br><br>The originals are backed up.");
+        replace = box.addButton(tr("Replace"), QMessageBox::AcceptRole);
+    } else {
+        box.setIcon(QMessageBox::Warning);
+        text += tr("<br><br><b style='color:#C42B1C'>%1 not backed up — this change can't be undone.</b>")
+                    .arg(notBackedUp.join(QStringLiteral(", ")) + (notBackedUp.size() == 1 ? tr(" is") : tr(" are")));
+        backupAndReplace = box.addButton(tr("Back Up && Replace"), QMessageBox::AcceptRole);
+        replace = box.addButton(tr("Replace Without Backup"), QMessageBox::DestructiveRole);
+    }
+    box.setText(text);
+    box.setDetailedText(details);
+    box.setDefaultButton(backupAndReplace ? backupAndReplace : replace);
+    box.exec();
+    if (box.clickedButton() == backupAndReplace && backupAndReplace)
+        batch.backupFirst = true;
+    else if (box.clickedButton() != replace)
+        return;
+
+    m_pendingSelect = locationOf(target);
+    m_statusLabel->setText(tr("Replacing %n file(s)…", nullptr, static_cast<int>(batch.items.size())));
+    m_progress->setRange(0, 0);
+    m_progress->show();
+    QApplication::setOverrideCursor(Qt::BusyCursor);
+    m_editWatcher->setFuture(startBatchReplace(m_session, std::move(batch)));
+    updateActions();
+}
+
 void MainWindow::replaceWithDialog(const VfsNode* node, QWidget* dialogParent)
 {
     if (!node || !m_editMode || !Vfs::canReplace(*node))
@@ -1724,6 +1826,7 @@ void MainWindow::updateActions()
     m_importAction->setEnabled(m_editMode && !busy && single && importKind(*m_session, *single) != ImportKind::None);
     m_editModeAction->setEnabled(!editing);
     m_replaceAction->setEnabled(m_editMode && !busy && single && Vfs::canReplace(*single));
+    m_replaceFolderAction->setEnabled(m_editMode && !busy && batchTarget());
     m_restoreAction->setEnabled(m_editMode && !busy && single && hasBackup(*m_session, *single));
     m_editTextAction->setEnabled(isEditableText(single, /*sniff=*/false));
     m_copyPathAction->setEnabled(!nodes.empty());
@@ -1743,6 +1846,8 @@ void MainWindow::showTreeContextMenu(const QPoint& pos)
     QMenu menu(this);
     menu.addAction(m_extractAction);
     menu.addAction(m_exportAction);
+    if (m_replaceFolderAction->isEnabled())
+        menu.addAction(m_replaceFolderAction);
     if (m_restoreAction->isEnabled())
         menu.addAction(m_restoreAction);
     menu.addSeparator();
@@ -1783,6 +1888,8 @@ void MainWindow::showListContextMenu(const QPoint& globalPos)
     menu.addAction(m_exportAction);
     menu.addSeparator();
     menu.addAction(m_replaceAction);
+    if (m_replaceFolderAction->isEnabled() && (nodes.empty() || !nodes.front()->isFile()))
+        menu.addAction(m_replaceFolderAction);
     if (m_importAction->isEnabled())
         menu.addAction(m_importAction);
     if (m_restoreAction->isEnabled())

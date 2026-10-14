@@ -5,6 +5,10 @@
 #include "viewer/core/RandomAccessFile.hpp"
 
 
+#include <algorithm>
+#include <set>
+#include <unordered_map>
+
 #include <QDir>
 #include <QFileInfo>
 #include <QLocale>
@@ -144,6 +148,100 @@ QFuture<EditResult> startReplace(std::shared_ptr<Session> session, ReplacePlan p
                                   toQString(report->storage));
         for (const auto& w : report->warnings)
             result.warnings << toQString(w);
+        return result;
+    });
+}
+
+BatchReplace planBatchReplace(const VfsNode& target, const std::filesystem::path& folder)
+{
+    BatchReplace batch;
+    std::unordered_map<std::string, const VfsNode*> byPath; // lower-case path below `target`
+    for (const VfsNode* file : Vfs::collectFiles(target))
+        if (Vfs::canReplace(*file))
+            byPath.emplace(toLower(file->pathRelativeTo(&target)), file);
+    const std::string ownName = toLower(target.name()) + '/';
+
+    std::set<std::filesystem::path> targets;
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(folder, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec))
+            continue;
+        const auto relative = it->path().lexically_relative(folder);
+        std::string key = toLower(std::string(reinterpret_cast<const char*>(relative.generic_u8string().c_str())));
+        auto found = byPath.find(key);
+        if (found == byPath.end() && key.starts_with(ownName))
+            found = byPath.find(key.substr(ownName.size()));
+        if (found == byPath.end()) {
+            batch.unmatched << QDir::toNativeSeparators(toQString(relative));
+            continue;
+        }
+        batch.items.push_back({found->second, QDir::cleanPath(toQString(it->path()))});
+        targets.insert(Vfs::editTarget(*found->second));
+    }
+    std::ranges::sort(batch.items, [](const BatchReplace::Item& a, const BatchReplace::Item& b) {
+        return a.node->virtualPath() < b.node->virtualPath();
+    });
+    batch.targets.assign(targets.begin(), targets.end());
+    return batch;
+}
+
+QFuture<EditResult> startBatchReplace(std::shared_ptr<Session> session, BatchReplace batch)
+{
+    return QtConcurrent::run([session = std::move(session), batch = std::move(batch)] {
+        EditResult result;
+        result.kind = EditResult::Kind::Replace;
+        if (batch.backupFirst) {
+            for (const auto& target : batch.targets) {
+                if (auto backup = ensureBackup(target, session->vfs.backupRoot()); !backup) {
+                    result.error = toQString(backup.error().message); // nothing written yet
+                    return result;
+                }
+            }
+        }
+        int replaced = 0;
+        int same = 0;
+        QStringList skipped;
+        std::set<std::string> notes; // archive warnings (signed archives), once each
+        for (const auto& item : batch.items) {
+            const QString name = toQString(item.node->virtualPath());
+            auto plan = planReplace(*session, *item.node, item.sourceFile);
+            if (!plan) {
+                skipped << QStringLiteral("%1: %2").arg(name, toQString(plan.error().message));
+                continue;
+            }
+            if (!plan->warning.isEmpty()) {
+                skipped << QStringLiteral("%1: %2").arg(name, plan->warning);
+                continue;
+            }
+            if (auto current = session->vfs.read(*item.node); current && *current == plan->data) {
+                ++same;
+                continue;
+            }
+            auto report = session->vfs.replace(*item.node, plan->data);
+            if (!report) {
+                skipped << QStringLiteral("%1: %2").arg(name, toQString(report.error().message));
+                continue;
+            }
+            ++replaced;
+            notes.insert(report->warnings.begin(), report->warnings.end());
+        }
+        if (replaced == 0 && skipped.isEmpty())
+            result.unchanged = true;
+        result.summary = QObject::tr("Replaced %n file(s) from the folder", nullptr, replaced);
+        if (same > 0)
+            result.summary += QObject::tr(" · %n already the same", nullptr, same);
+        if (!skipped.isEmpty()) {
+            result.summary += QObject::tr(" · %n skipped", nullptr, static_cast<int>(skipped.size()));
+            QString list = QObject::tr("Not replaced:");
+            for (qsizetype i = 0; i < std::min<qsizetype>(skipped.size(), 15); ++i)
+                list += QStringLiteral("\n• ") + skipped[i];
+            if (skipped.size() > 15)
+                list += QObject::tr("\n… and %n more", nullptr, static_cast<int>(skipped.size() - 15));
+            result.warnings << list;
+        }
+        for (const auto& note : notes)
+            result.warnings << toQString(note);
         return result;
     });
 }
