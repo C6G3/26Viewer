@@ -3,6 +3,7 @@
 #include "../BackupBanner.hpp"
 #include "../BusyOverlay.hpp"
 #include "../QtConvert.hpp"
+#include "../SettingsDialog.hpp"
 #include "AnimationSupport.hpp"
 #include "HexView.hpp"
 #include "ImageView.hpp"
@@ -57,6 +58,7 @@ struct PreviewResult {
     bool decompiled = false;   ///< Text made from a binary file…
     bool recompilable = false; ///< …whose edited values can be written back (Edit).
     bool textTruncated = false;
+    qint64 textLimit = 0; ///< Settings: text shown up to this many bytes.
 
     std::shared_ptr<const Mesh> mesh;
     QString meshError;
@@ -76,9 +78,6 @@ struct PreviewResult {
 
 namespace {
 
-constexpr std::uint64_t kLooseReadLimit = 64ull << 20;    // hex/preview of big loose files
-constexpr std::uint64_t kPackedPreviewLimit = 512ull << 20; // packed entries must be read whole
-constexpr qsizetype kTextLimit = 4 << 20;
 constexpr std::uint64_t kHexOnlyLimit = 1ull << 20; // hex dump of audio banks / videos (the rest isn't needed)
 
 QString exactSize(std::uint64_t bytes)
@@ -181,11 +180,11 @@ QImage renderDrawing(const Drawing& drawing, int pixels)
     return image;
 }
 
-/// Decodes up to kTextLimit bytes of text and notes its encoding and line endings.
+/// Decodes up to r.textLimit bytes of text and notes its encoding and line endings.
 void decodeTextInto(PreviewResult& r, ByteSpan data, const std::string& name)
 {
     // Cut long files at an even length so UTF-16 isn't split mid-character.
-    const std::size_t limit = static_cast<std::size_t>(kTextLimit) & ~std::size_t{1};
+    const std::size_t limit = static_cast<std::size_t>(r.textLimit) & ~std::size_t{1};
     r.textTruncated = data.size() > limit;
     auto doc = decodeText(data.first(std::min(data.size(), limit)));
     if (!doc) { // e.g. a UTF-8 BOM followed by invalid bytes
@@ -202,9 +201,12 @@ void decodeTextInto(PreviewResult& r, ByteSpan data, const std::string& name)
     r.hasText = true;
 }
 
-std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, const VfsNode* node, quint64 generation)
+/// `limits`: the preview sizes from Settings (read on the UI thread).
+std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, const VfsNode* node, quint64 generation,
+                                           AppSettings limits)
 {
     auto r = std::make_shared<PreviewResult>();
+    r->textLimit = static_cast<qint64>(limits.textLimit());
     r->generation = generation;
     const std::string ext = extensionOf(node->name());
     const FileTypeInfo type = session->content.fileTypes().lookup(node->name());
@@ -238,7 +240,7 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
             r->isVideo = true;
             if (!node->diskPath().empty()) {
                 r->videoFile = toQString(node->diskPath());
-            } else if ((*source)->size() <= kPackedPreviewLimit) {
+            } else if ((*source)->size() <= limits.packedPreviewLimit()) {
                 if (auto all = (*source)->read(0, static_cast<std::size_t>((*source)->size())))
                     r->videoData = QByteArray(reinterpret_cast<const char*>(all->data()),
                                               static_cast<qsizetype>(all->size()));
@@ -247,12 +249,12 @@ std::shared_ptr<PreviewResult> loadPreview(std::shared_ptr<Session> session, con
         return r;
     }
 
-    if (node->archive() && node->size() > kPackedPreviewLimit) {
+    if (node->archive() && node->size() > limits.packedPreviewLimit()) {
         r->error = QObject::tr("This file is too large to preview (%1). Extract it instead.")
                        .arg(QLocale().formattedDataSize(static_cast<qint64>(node->size())));
         return r;
     }
-    auto data = session->vfs.read(*node, kLooseReadLimit);
+    auto data = session->vfs.read(*node, limits.looseReadLimit());
     if (!data) {
         r->error = toQString(data.error().message);
         return r;
@@ -531,7 +533,7 @@ void PreviewPane::display(const VfsNode* node, int forcedTab)
     showMessage(tr("Loading…"));
     m_busy->start(tr("Loading %1…").arg(toQString(node->name())));
     fillProperties(node, nullptr);
-    m_watcher->setFuture(QtConcurrent::run(loadPreview, m_session, node, m_generation));
+    m_watcher->setFuture(QtConcurrent::run(loadPreview, m_session, node, m_generation, AppSettings::load()));
 }
 
 void PreviewPane::applyResult(const PreviewResult& result)
@@ -576,7 +578,7 @@ void PreviewPane::applyResult(const PreviewResult& result)
         const int lines = static_cast<int>(result.text.count(QLatin1Char('\n')) + 1);
         QString info = result.textInfo + tr("  ·  %n line(s)", nullptr, lines);
         if (result.textTruncated)
-            info += tr("  ·  showing the first %1").arg(QLocale().formattedDataSize(kTextLimit));
+            info += tr("  ·  showing the first %1").arg(QLocale().formattedDataSize(result.textLimit));
         m_text->setText(result.text, result.syntax, info);
         m_text->setEditButtonVisible(!result.decompiled || result.recompilable);
         m_previewStack->setCurrentWidget(m_text);

@@ -2,6 +2,7 @@
 
 #include "../Icons.hpp"
 #include "../QtConvert.hpp"
+#include "../SettingsDialog.hpp"
 
 #include "viewer/core/Image.hpp"
 
@@ -356,7 +357,7 @@ void ImageView::savePng()
                 base += m_channels[i]->text();
     }
     QSettings settings;
-    const QString lastDir = settings.value("paths/lastExtractDir").toString();
+    const QString lastDir = AppSettings::startFolder();
     const QString file = QFileDialog::getSaveFileName(this, tr("Save as PNG"),
                                                       QDir(lastDir).filePath(base + QStringLiteral(".png")),
                                                       tr("PNG picture (*.png)"));

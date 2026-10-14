@@ -62,7 +62,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    or uncompressed, the original format by default; DXT encoder in core)
 9. [x] Parallel extraction: four files at once (boot.pak 3.2 s → 1.3 s); Export two at once, files of
    4 MB or more (levels) alone so memory stays bounded (boot.pak export 42 s → 23 s); output identical
-10. [ ] Settings dialog (default extract folder, preview size limits)
+10. [x] Settings dialog (Edit ▸ Settings, `Ctrl+,`): theme, reopen at start-up, the folder save dialogs start
+    in, files extracted / exported at once, preview size limits
 11. [ ] Release workflow: tag → CI builds `dist/release` → zip attached to a GitHub Release
 
 ## Phase 4 — Deeper Blur support

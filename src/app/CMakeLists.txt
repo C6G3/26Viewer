@@ -28,6 +28,8 @@ qt_add_executable(viewer_app WIN32
     MainWindow.hpp
     PreviewWindow.cpp
     PreviewWindow.hpp
+    SettingsDialog.cpp
+    SettingsDialog.hpp
     QtConvert.hpp
     Session.cpp
     Session.hpp

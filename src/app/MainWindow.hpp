@@ -141,6 +141,8 @@ private:
     /// View ▸ Go to Path… (Ctrl+L): type or paste a path (suggestions as you
     /// type) and jump there.
     void goToPath();
+    /// Edit > Settings.
+    void showSettings();
 
     // Text editing (TextEditorWindow)
     /// Whether `node` can be opened in the text editor; with `sniff`, files of

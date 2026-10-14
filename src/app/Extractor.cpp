@@ -1,6 +1,7 @@
 #include "Extractor.hpp"
 
 #include "QtConvert.hpp"
+#include "SettingsDialog.hpp"
 
 #include "viewer/core/RandomAccessFile.hpp"
 
@@ -86,7 +87,7 @@ QFuture<ExtractSummary> runItems(std::shared_ptr<Session> session, std::vector<E
 QFuture<ExtractSummary> startExtraction(std::shared_ptr<Session> session, std::vector<ExtractItem> items,
                                         std::filesystem::path outputDir)
 {
-    // Plain copies: a few at once keeps the disk busy without thrashing it.
+    // Plain copies: a few at once (Settings) keeps the disk busy without thrashing it.
     return runItems(std::move(session), std::move(items),
                     [outputDir = std::move(outputDir)](const Session& job,
                                                        const ExtractItem& item) -> Result<ItemDone> {
@@ -97,7 +98,7 @@ QFuture<ExtractSummary> startExtraction(std::shared_ptr<Session> session, std::v
                             return std::unexpected(ok.error());
                         return ItemDone{};
                     },
-                    {.threads = 4});
+                    {.threads = AppSettings::load().extractThreads});
 }
 
 } // namespace viewer::app

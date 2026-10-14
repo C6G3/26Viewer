@@ -3,6 +3,7 @@
 #include "Exporter.hpp"
 #include "ImportExportDialogs.hpp"
 #include "QtConvert.hpp"
+#include "SettingsDialog.hpp"
 #include "preview/ImageView.hpp"
 
 #include <QCloseEvent>
@@ -408,7 +409,7 @@ void TextureBrowser::exportTextures(const std::vector<int>& indices)
     if (indices.empty() || !m_loaded.format)
         return;
     QSettings settings;
-    const QString lastDir = settings.value("paths/lastExtractDir").toString();
+    const QString lastDir = AppSettings::startFolder();
     struct Target {
         int index;
         QString path;
@@ -472,7 +473,7 @@ void TextureBrowser::extractTextures(const std::vector<int>& indices)
     if (indices.empty() || !m_loaded.format)
         return;
     QSettings settings;
-    const QString lastDir = settings.value("paths/lastExtractDir").toString();
+    const QString lastDir = AppSettings::startFolder();
     QString dir;
     QString single;
     if (indices.size() == 1) {

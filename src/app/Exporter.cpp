@@ -1,6 +1,7 @@
 #include "Exporter.hpp"
 
 #include "QtConvert.hpp"
+#include "SettingsDialog.hpp"
 
 #include "viewer/core/Audio.hpp"
 #include "viewer/core/Mesh.hpp"
@@ -272,7 +273,7 @@ QFuture<ExtractSummary> startExport(std::shared_ptr<Session> session, std::vecto
                                     std::filesystem::path outputDir, ExportOptions options)
 {
     // Converting can take far more memory than the file (a level's textures and
-    // meshes): two at a time, and files of 4 MB or more on their own.
+    // meshes): fewer at a time than Extract, and files of 4 MB or more on their own.
     return runItems(std::move(session), std::move(items),
                     [outputDir = std::move(outputDir), options](const Session& job,
                                                                 const ExtractItem& item) -> Result<ItemDone> {
@@ -283,7 +284,7 @@ QFuture<ExtractSummary> startExport(std::shared_ptr<Session> session, std::vecto
                         done.files = *written;
                         return done;
                     },
-                    {.threads = 2, .exclusiveSize = 4ull << 20});
+                    {.threads = AppSettings::load().exportThreads, .exclusiveSize = 4ull << 20});
 }
 
 bool hasTextures(const Session& session, const std::vector<ExtractItem>& items)

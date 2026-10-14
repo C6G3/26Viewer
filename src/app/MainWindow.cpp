@@ -8,6 +8,7 @@
 #include "Icons.hpp"
 #include "ImportExportDialogs.hpp"
 #include "QtConvert.hpp"
+#include "SettingsDialog.hpp"
 #include "Theme.hpp"
 #include "VfsModel.hpp"
 #include "PreviewWindow.hpp"
@@ -315,6 +316,12 @@ void MainWindow::buildActions()
         m_search->setFocus();
         m_search->selectAll();
     });
+    edit->addSeparator();
+    QAction* settingsAction =
+        edit->addAction(icons::theme(TI::DocumentProperties, QStyle::SP_FileDialogDetailedView), tr("&Settings…"));
+    settingsAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Comma));
+    settingsAction->setMenuRole(QAction::PreferencesRole);
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::showSettings);
 
     auto* showFiles = new QAction(tr("Show &Files in Tree"), this);
     showFiles->setCheckable(true);
@@ -867,7 +874,16 @@ void MainWindow::showForScreenshot(const QString& name)
     } else if (name == "recent") {
         populateRecentMenu();
         m_recentMenu->popup(mapToGlobal(QPoint(40, 40)));
+    } else if (name == "settings") {
+        showSettings();
     }
+}
+
+void MainWindow::showSettings()
+{
+    SettingsDialog dialog(m_theme, this);
+    if (dialog.exec() == QDialog::Accepted)
+        m_reopenAction->setChecked(QSettings().value("session/reopenOnStartup", true).toBool());
 }
 
 void MainWindow::goToPath()
@@ -1807,8 +1823,7 @@ void MainWindow::extractNodes(const std::vector<const VfsNode*>& nodes)
 
     QSettings settings;
     const QString dir = QFileDialog::getExistingDirectory(
-        this, tr("Extract %n file(s) to", nullptr, static_cast<int>(items.size())),
-        settings.value("paths/lastExtractDir").toString());
+        this, tr("Extract %n file(s) to", nullptr, static_cast<int>(items.size())), AppSettings::startFolder());
     if (dir.isEmpty())
         return;
     settings.setValue("paths/lastExtractDir", dir);
@@ -1883,8 +1898,7 @@ void MainWindow::exportNodes(const std::vector<const VfsNode*>& nodes, QWidget* 
     }
     QSettings settings;
     const QString dir = QFileDialog::getExistingDirectory(
-        parent, tr("Export %n file(s) to", nullptr, static_cast<int>(items.size())),
-        settings.value("paths/lastExtractDir").toString());
+        parent, tr("Export %n file(s) to", nullptr, static_cast<int>(items.size())), AppSettings::startFolder());
     if (dir.isEmpty())
         return;
     settings.setValue("paths/lastExtractDir", dir);
