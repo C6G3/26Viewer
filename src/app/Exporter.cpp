@@ -271,33 +271,19 @@ Result<LoadedTexture> loadTexture(const Session& session, const VfsNode& node)
 QFuture<ExtractSummary> startExport(std::shared_ptr<Session> session, std::vector<ExtractItem> items,
                                     std::filesystem::path outputDir, ExportOptions options)
 {
-    return QtConcurrent::run([session = std::move(session), items = std::move(items),
-                              outputDir = std::move(outputDir), options](QPromise<ExtractSummary>& promise) {
-        ExtractSummary summary;
-        promise.setProgressRange(0, static_cast<int>(items.size()));
-        int done = 0;
-        for (const auto& item : items) {
-            if (promise.isCanceled()) {
-                summary.canceled = true;
-                break;
-            }
-            promise.setProgressValueAndText(done, toQString(item.node->name()));
-            bool converted = false;
-            if (auto written = exportOne(*session, item, outputDir, options, converted)) {
-                summary.written += *written;
-                summary.converted += converted;
-                summary.bytes += item.node->size();
-            } else {
-                ++summary.failed;
-                if (summary.errors.size() < 20)
-                    summary.errors << QStringLiteral("%1: %2").arg(toQString(item.relativePath),
-                                                                   toQString(written.error().message));
-            }
-            ++done;
-        }
-        promise.setProgressValue(done);
-        promise.addResult(summary);
-    });
+    // Converting can take far more memory than the file (a level's textures and
+    // meshes): two at a time, and files of 4 MB or more on their own.
+    return runItems(std::move(session), std::move(items),
+                    [outputDir = std::move(outputDir), options](const Session& job,
+                                                                const ExtractItem& item) -> Result<ItemDone> {
+                        ItemDone done;
+                        auto written = exportOne(job, item, outputDir, options, done.converted);
+                        if (!written)
+                            return std::unexpected(written.error());
+                        done.files = *written;
+                        return done;
+                    },
+                    {.threads = 2, .exclusiveSize = 4ull << 20});
 }
 
 bool hasTextures(const Session& session, const std::vector<ExtractItem>& items)

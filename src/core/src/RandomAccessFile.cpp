@@ -117,6 +117,8 @@ Result<void> writeFile(const std::filesystem::path& path, ByteSpan data)
     std::error_code ec;
     if (path.has_parent_path())
         std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec && std::filesystem::is_directory(path.parent_path()))
+        ec.clear(); // another thread made it at the same moment
     if (ec)
         return fail(ErrorCode::Io, "cannot create folder '{}': {}", displayPath(path.parent_path()),
                     ec.message());

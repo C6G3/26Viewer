@@ -60,7 +60,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 8. [x] Export converted formats (sound banks → .wav folders, models → .obj, textures →
    .png/.dds/.jpg/.bmp) and Import back (.wav folder → bank, picture → texture with DXT1/3/5
    or uncompressed, the original format by default; DXT encoder in core)
-9. [ ] Parallel extraction (several files at once; archives already support concurrent reads)
+9. [x] Parallel extraction: four files at once (boot.pak 3.2 s → 1.3 s); Export two at once, files of
+   4 MB or more (levels) alone so memory stays bounded (boot.pak export 42 s → 23 s); output identical
 10. [ ] Settings dialog (default extract folder, preview size limits)
 11. [ ] Release workflow: tag → CI builds `dist/release` → zip attached to a GitHub Release
 
