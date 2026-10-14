@@ -107,6 +107,7 @@ private:
     std::vector<bool> m_highlighted;
     std::vector<bool> m_helper; ///< Per part: Mesh::isHelper (worked out once per mesh).
     std::vector<int> m_partTexture; ///< Per part: the texture it's coloured with (Mesh::textures), or -1.
+    std::vector<int> m_partLightmap; ///< Per part: its baked lighting (Mesh::textures, read with uvs2), or -1.
     std::vector<GLuint> m_glTextures;
     std::vector<bool> m_textureAlpha; ///< Per texture: has see-through pixels.
     std::vector<float> m_rest;            ///< Uploaded vertex data at rest (posing starts from it).

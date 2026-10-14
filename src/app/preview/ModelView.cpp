@@ -43,16 +43,19 @@ constexpr const char* kVertexShader = R"(
 attribute vec3 position;
 attribute vec3 normal;
 attribute vec2 uv;
+attribute vec2 uv2;
 attribute float vertexAlpha;
 uniform mat4 mvp;
 uniform mat4 model;
 uniform mat3 normalMatrix;
 varying vec3 vNormal;
 varying vec2 vUv;
+varying vec2 vUv2;
 varying float vAlpha;
 void main() {
     vNormal = normalMatrix * normal;
     vUv = uv;
+    vUv2 = uv2;
     vAlpha = vertexAlpha;
     gl_Position = mvp * model * vec4(position, 1.0);
 }
@@ -70,8 +73,17 @@ uniform sampler2D tex;
 uniform float textured;  // 1: colour from the part's texture
 uniform float alphaTest; // texture alpha below this is cut out
 uniform float texAlpha;  // 1: the texture's (and vertex's) alpha sets the coverage (glows, decals)
+// Blur's lightmapped surfaces, as its effects' "MaterialLOD" pass draws them
+// (road_ln_ng.fxb): light = (lightmap.rgb * lightmap.a)^2, colour =
+// sqrt(light * albedo * g_vLuminance). The lightmap is all the light they get.
+// The game then tone-maps with automatic exposure; one fixed exposure stands
+// in for g_vLuminance and that step here.
+const float kLightmapExposure = 3.0;
 varying vec3 vNormal;
+uniform sampler2D lightmap;
+uniform float lightmapped; // 1: the part's baked lighting (shadows) multiplies its colour
 varying vec2 vUv;
+varying vec2 vUv2;
 varying float vAlpha;
 void main() {
     vec4 t = textured > 0.5 ? texture2D(tex, vUv) : vec4(1.0);
@@ -79,6 +91,13 @@ void main() {
     if (t.a < alphaTest)
         discard;
     vec3 base = color * t.rgb;
+    if (lightmapped > 0.5 && textured > 0.5) {
+        vec4 l = texture2D(lightmap, vUv2);
+        vec3 light = l.rgb * l.a;
+        gl_FragColor = vec4(sqrt(max(light * light * base * kLightmapExposure, 0.0)),
+                            alpha * mix(1.0, t.a, texAlpha));
+        return;
+    }
     // A studio around the model, like the game's lighting: a key light from the
     // upper front, a soft fill from the other side, light from the sky above and
     // the ground below, highlights, and the sky reflected at grazing angles.
@@ -154,8 +173,8 @@ int colourTexture(const Mesh::Part& part)
         }
     // Otherwise the first plain picture ("tTexture" on effects): not a map of
     // normals, dents, scratches, distortion, masks or material settings.
-    static constexpr const char* kNotColour[] = {"bump", "nrm", "normal", "dent", "scratch", "distort", "mask",
-                                                 "material", "spec", "env", "damage"};
+    static constexpr const char* kNotColour[] = {"bump", "nrm",      "normal", "dent",   "scratch", "distort",
+                                                 "mask", "material", "spec",   "env",    "damage",  "lightmap"};
     for (const Mesh::TextureSlot& slot : part.textures) {
         const std::string name = lower(slot.name);
         if (slot.texture >= 0
@@ -218,7 +237,7 @@ QMatrix4x4 shadowMatrix(float h)
                       0, 0, 0, 1);
 }
 
-constexpr int kFloats = 9; // per vertex: position, normal, uv, alpha
+constexpr int kFloats = 11; // per vertex: position, normal, uv, lightmap uv, alpha
 constexpr int kStride = kFloats * sizeof(float);
 
 } // namespace
@@ -259,9 +278,14 @@ void ModelCanvas::setMesh(std::shared_ptr<const Mesh> mesh)
     m_highlighted.assign(m_visible.size(), false);
     m_helper.assign(m_visible.size(), false);
     m_partTexture.assign(m_visible.size(), -1);
+    m_partLightmap.assign(m_visible.size(), -1);
     for (std::size_t p = 0; p < m_helper.size(); ++p) {
         m_helper[p] = m_mesh->isHelper(m_mesh->parts[p]);
         m_partTexture[p] = colourTexture(m_mesh->parts[p]);
+        if (m_mesh->uvs2.size() == 2 * m_mesh->vertexCount())
+            for (const Mesh::TextureSlot& slot : m_mesh->parts[p].textures)
+                if (slot.texture >= 0 && QString::fromStdString(slot.name).contains("lightmap", Qt::CaseInsensitive))
+                    m_partLightmap[p] = slot.texture;
     }
     // Bounds of the real geometry (not shadow hulls or collision) → camera framing, grid and ground.
     if (m_mesh && m_mesh->vertexCount()) {
@@ -298,7 +322,7 @@ void ModelCanvas::buildGrid(const QVector3D& lo, const QVector3D& hi)
     const int z0 = static_cast<int>(from(lo.z())), z1 = static_cast<int>(to(hi.z()));
     std::vector<float> minor, major;
     const auto line = [](std::vector<float>& out, float ax, float az, float bx, float bz, float y) {
-        out.insert(out.end(), {ax, y, az, 0, 1, 0, 0, 0, 1, bx, y, bz, 0, 1, 0, 0, 0, 1});
+        out.insert(out.end(), {ax, y, az, 0, 1, 0, 0, 0, 0, 0, 1, bx, y, bz, 0, 1, 0, 0, 0, 0, 1});
     };
     for (int i = x0; i <= x1; ++i)
         line(i % 5 ? minor : major, i * spacing, z0 * spacing, i * spacing, z1 * spacing, m_ground);
@@ -400,6 +424,7 @@ void ModelCanvas::initializeGL()
     m_program.bindAttributeLocation("normal", 1);
     m_program.bindAttributeLocation("uv", 2);
     m_program.bindAttributeLocation("vertexAlpha", 3);
+    m_program.bindAttributeLocation("uv2", 4);
     m_glReady = m_program.link();
     m_vertices.create();
     m_triangles.create();
@@ -441,6 +466,7 @@ void ModelCanvas::upload()
     const bool uvs = mesh.uvs.size() == 2 * mesh.vertexCount();
     std::vector<float> interleaved;
     const bool alphas = mesh.colors.size() == 4 * mesh.vertexCount();
+    const bool uvs2 = mesh.uvs2.size() == 2 * mesh.vertexCount();
     interleaved.reserve(mesh.vertexCount() * kFloats);
     for (std::size_t v = 0; v < mesh.vertexCount(); ++v) {
         QVector3D n = (detailed[v].isNull() ? coarse[v] : detailed[v]).normalized();
@@ -452,6 +478,7 @@ void ModelCanvas::upload()
         interleaved.insert(interleaved.end(), {mesh.positions[3 * v], mesh.positions[3 * v + 1],
                                                mesh.positions[3 * v + 2], n.x(), n.y(), n.z(),
                                                uvs ? mesh.uvs[2 * v] : 0.0f, uvs ? mesh.uvs[2 * v + 1] : 0.0f,
+                                               uvs2 ? mesh.uvs2[2 * v] : 0.0f, uvs2 ? mesh.uvs2[2 * v + 1] : 0.0f,
                                                alphas ? mesh.colors[4 * v + 3] / 255.0f : 1.0f});
     }
     uploadTextures();
@@ -672,7 +699,8 @@ void ModelCanvas::bindVertices(QOpenGLBuffer& buffer)
     m_program.setAttributeBuffer(0, GL_FLOAT, 0, 3, kStride);
     m_program.setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(float), 3, kStride);
     m_program.setAttributeBuffer(2, GL_FLOAT, 6 * sizeof(float), 2, kStride);
-    m_program.setAttributeBuffer(3, GL_FLOAT, 8 * sizeof(float), 1, kStride);
+    m_program.setAttributeBuffer(4, GL_FLOAT, 8 * sizeof(float), 2, kStride);
+    m_program.setAttributeBuffer(3, GL_FLOAT, 10 * sizeof(float), 1, kStride);
 }
 
 void ModelCanvas::paintGL()
@@ -710,6 +738,7 @@ void ModelCanvas::paintGL()
     m_program.setUniformValue("rim", 0.0f);
     m_program.setUniformValue("up", view.mapVector(QVector3D(0, 1, 0)).normalized());
     m_program.setUniformValue("tex", 0);
+    m_program.setUniformValue("lightmap", 1);
     m_program.setUniformValue("textured", 0.0f);
     m_program.setUniformValue("alphaTest", 0.0f);
     m_program.setUniformValue("texAlpha", 0.0f);
@@ -717,6 +746,7 @@ void ModelCanvas::paintGL()
     m_program.enableAttributeArray(1);
     m_program.enableAttributeArray(2);
     m_program.enableAttributeArray(3);
+    m_program.enableAttributeArray(4);
 
     const auto lodRange = [&](std::size_t part) -> const Mesh::Range* {
         const auto& lods = mesh.parts[part].lods;
@@ -794,6 +824,15 @@ void ModelCanvas::paintGL()
             if (textured)
                 glBindTexture(GL_TEXTURE_2D, m_glTextures[static_cast<std::size_t>(t)]);
             m_program.setUniformValue("textured", textured ? 1.0f : 0.0f);
+            const int lm = m_partLightmap[p];
+            const bool lightmapped = textured && lm >= 0 && static_cast<std::size_t>(lm) < m_glTextures.size()
+                                     && m_glTextures[static_cast<std::size_t>(lm)] != 0;
+            if (lightmapped) {
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, m_glTextures[static_cast<std::size_t>(lm)]);
+                glActiveTexture(GL_TEXTURE0);
+            }
+            m_program.setUniformValue("lightmapped", lightmapped ? 1.0f : 0.0f);
             const AlphaUse use = use0;
             // Cut-outs drop their see-through pixels with a clean edge; blended
             // effects fade with the texture's alpha (fully clear pixels dropped).
@@ -896,6 +935,7 @@ void ModelCanvas::paintGL()
     m_program.disableAttributeArray(1);
     m_program.disableAttributeArray(2);
     m_program.disableAttributeArray(3);
+    m_program.disableAttributeArray(4);
     m_program.release();
 }
 

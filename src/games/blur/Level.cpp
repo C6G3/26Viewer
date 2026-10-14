@@ -923,6 +923,12 @@ public:
                 for (int k = 0; k < 2; ++k)
                     m_mesh.uvs.push_back(vb.uv >= 0 ? readComponent(m_d, at + static_cast<std::size_t>(vb.uv), vb.uvType, k)
                                                     : 0.0f);
+                // Lightmapped meshes keep their lightmap coordinates in the
+                // second half of a four-part texture coordinate.
+                const bool lightmapUv = vb.uv >= 0 && (vb.uvType == 0x07 || vb.uvType == 0x09);
+                for (int k = 2; k < 4; ++k)
+                    m_mesh.uvs2.push_back(
+                        lightmapUv ? readComponent(m_d, at + static_cast<std::size_t>(vb.uv), vb.uvType, k) : 0.0f);
                 for (std::size_t k = 0; k < 4; ++k)
                     m_mesh.colors.push_back(
                         vb.color >= 0 ? std::to_integer<std::uint8_t>(m_d[at + static_cast<std::size_t>(vb.color) + k])
@@ -1041,23 +1047,29 @@ public:
         return static_cast<int>(m_mesh.textures.size()) - 1;
     }
 
-    /// The colour textures a geometry's material binds (its value set's
-    /// texture elements, which index the node's texture list).
-    std::vector<Mesh::TextureSlot> textureSlots(const SceneNode& node, ResIdx ref)
+    /// The colour textures and the lightmap a geometry binds: the texture
+    /// elements of its streams' value sets (the first stream's is the
+    /// material; a second one, if any, holds just "g_tLightmap"). They index
+    /// the node's texture list.
+    std::vector<Mesh::TextureSlot> textureSlots(const SceneNode& node, const Geometry& g)
     {
+        static constexpr std::string_view kWanted[] = {"g_tAlbedo",     "g_tColour", "g_tTexture",
+                                                       "g_2L_tTexture", "g_tNeon",   "g_tLightmap"};
         std::vector<Mesh::TextureSlot> slots;
-        if (ref.second != 0 || ref.first >= node.values.size())
-            return slots;
-        const ValueSet& set = node.values[ref.first];
-        std::size_t at = 0;
-        for (const MaterialElement& e : node.materials.types[set.type].elements) {
-            static constexpr std::string_view kColour[] = {"g_tAlbedo", "g_tColour", "g_tTexture", "g_2L_tTexture",
-                                                           "g_tNeon"};
-            if (e.kind == 7 && e.count == 1 && at < set.words.size()
-                && std::ranges::find(kColour, std::string_view(e.name)) != std::end(kColour)
-                && set.words[at] < node.textures.size())
-                slots.push_back({e.name, texture(node.textures[set.words[at]])});
-            at += e.count;
+        for (const Stream& stream : g.streams) {
+            const ResIdx ref = stream.values;
+            if (ref.second != 0 || ref.first >= node.values.size())
+                continue;
+            const ValueSet& set = node.values[ref.first];
+            std::size_t at = 0;
+            for (const MaterialElement& e : node.materials.types[set.type].elements) {
+                if (e.kind == 7 && e.count == 1 && at < set.words.size()
+                    && std::ranges::find(kWanted, std::string_view(e.name)) != std::end(kWanted)
+                    && set.words[at] < node.textures.size()
+                    && std::ranges::none_of(slots, [&](const Mesh::TextureSlot& s) { return s.name == e.name; }))
+                    slots.push_back({e.name, texture(node.textures[set.words[at]])});
+                at += e.count;
+            }
         }
         return slots;
     }
@@ -1164,13 +1176,13 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
                     std::pair<std::string, std::vector<Mesh::TextureSlot>> m;
                     if (!g.streams.empty()) {
                         m.first = effectOf(*node, g.streams.front().values);
-                        m.second = builder.textureSlots(*node, g.streams.front().values);
+                        m.second = builder.textureSlots(*node, g);
                     }
                     return m;
                 };
                 const auto textureName = [&](const std::vector<Mesh::TextureSlot>& slots) {
                     for (const Mesh::TextureSlot& slot : slots)
-                        if (slot.texture >= 0)
+                        if (slot.texture >= 0 && slot.name != "g_tLightmap")
                             return builder.mesh().textures[static_cast<std::size_t>(slot.texture)].name;
                     return std::string{};
                 };
@@ -1179,11 +1191,17 @@ Result<Mesh> decodeLevel(ByteSpan render, ByteSpan stream)
                     std::vector<Mesh::TextureSlot> slots;
                     std::vector<const Geometry*> geometry;
                 };
-                std::map<std::tuple<std::string, int, Mesh::Part::Alpha>, Group> byMaterial;
+                std::map<std::tuple<std::string, int, Mesh::Part::Alpha, int>, Group> byMaterial;
                 for (const Geometry& g : node->staticGeometry) {
                     auto [effect, slots] = materialOf(g);
-                    const int colour = slots.empty() ? -1 : slots.front().texture;
-                    Group& group = byMaterial[{std::move(effect), colour, g.alpha}];
+                    int colour = -1, lightmap = -1;
+                    for (const Mesh::TextureSlot& slot : slots) {
+                        if (slot.name == "g_tLightmap")
+                            lightmap = slot.texture;
+                        else if (colour == -1)
+                            colour = slot.texture;
+                    }
+                    Group& group = byMaterial[{std::move(effect), colour, g.alpha, lightmap}];
                     group.slots = std::move(slots);
                     group.geometry.push_back(&g);
                 }

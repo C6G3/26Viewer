@@ -569,9 +569,29 @@ part's colour texture (`g_tAlbedo`, `g_tColour`, `g_tTexture`, `g_tNeon`) at
 up to 1024 pixels, kept compressed (Russian Hill, the largest: 3,041
 textures, 434 MB).
 
+**Lightmaps.** A lightmapped geometry has a second stream (its vertex-buffer
+slot names no buffer) whose value set holds only `g_tLightmap`; the lightmap
+coordinates are the second half of the vertex's four-part texture coordinate
+(half4 `TEXCOORD0`.zw, plus `g_vUVOffset` for instances). Lightmaps are DXT5
+atlases (`lightmap_main_008-a`, 512×512): rgb a tint (mostly sky blue, lamps
+orange), alpha the brightness. The effects' simple pass (`MaterialLOD`, read
+from `road_ln_ng.fxb` with D3DCompiler's disassembler) draws
+
+```
+light = (lightmap.rgb * lightmap.a)^2
+detail = lerp(albedo, detailAlbedo, detailAlbedo.a * vertex.a)
+colour = sqrt(light * detail * g_vLuminance.x)
+```
+
+and the frame is then tone-mapped (automatic exposure: `g_vLuminance` is 1
+until the HDR pass sets it). The viewer draws lightmapped parts with this
+formula (the lightmap is their only light), a fixed exposure of 3 standing in
+for `g_vLuminance` and the automatic exposure; the game's tone mapping and
+colour grading aren't reproduced, so the scene keeps the lightmaps' blue cast.
+
 Brighton: 91 scene nodes, 13,851 draws, 4.7 million triangles, 1,859 textures
-drawn. Not drawn yet: lightmaps (`g_tLightmap`, a second UV set), normal and
-material maps, the ocean (its normal maps are animated by the game).
+drawn, ~1,700 lightmapped parts. Not drawn yet: normal, specular and material
+maps, the detail layers, the ocean (its normal maps are animated by the game).
 
 ## Collision — physics streams ✅
 

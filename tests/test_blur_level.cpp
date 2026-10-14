@@ -88,15 +88,24 @@ TEST_CASE("Real Blur levels (set BLUR_DIR to enable)")
             bytes += t.stored.data.size();
             CHECK(t.stored.data.size() == image::chainSize(t.stored.format, t.stored.width, t.stored.height,
                                                            t.stored.mipCount));
-            if (t.stored.width >= 8 && t.stored.height >= 8) // (a few 4x4 ones store only 1-2 sizes)
+            // Lightmaps (and a few 4x4 textures) store only their top 1-2 sizes.
+            CHECK(t.stored.mipCount >= 1);
+            if (t.stored.width >= 8 && t.stored.height >= 8 && !t.name.starts_with("lightmap"))
                 CHECK(t.stored.mipCount == image::fullMipCount(t.stored.width, t.stored.height));
         }
         INFO(std::format("{} textures, {} MB", mesh->textures.size(), bytes >> 20));
         CHECK(textured > mesh->triangleCount() * 9 / 10);
         CHECK(mesh->colors.size() == 4 * mesh->vertexCount());
+        CHECK(mesh->uvs2.size() == 2 * mesh->vertexCount());
+        const auto lightmapped = std::ranges::count_if(mesh->parts, [](const Mesh::Part& part) {
+            return std::ranges::any_of(part.textures, [](const Mesh::TextureSlot& t) {
+                return t.name == "g_tLightmap" && t.texture >= 0;
+            });
+        });
         if (entry.path().filename() == "uk_brighton") {
             CHECK(mesh->triangleCount() > 4'500'000);
             CHECK(mesh->textures.size() > 1000);
+            CHECK(lightmapped > 1000); // the world's baked lighting
         }
         ++levels;
     }

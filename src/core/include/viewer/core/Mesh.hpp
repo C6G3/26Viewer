@@ -75,6 +75,9 @@ struct Mesh {
     std::vector<float> positions;       ///< x, y, z per vertex.
     std::vector<float> normals;         ///< x, y, z per vertex (unit length), or empty.
     std::vector<float> uvs;             ///< u, v per vertex (first UV set; v down, as in Direct3D), or empty.
+    /// A second u, v per vertex, or empty: where a part's lightmap (a texture
+    /// slot named "…Lightmap") is read (Blur levels).
+    std::vector<float> uvs2;
     /// r, g, b, a per vertex (0-255), or empty. Blur levels: alpha fades
     /// blended decals (painted lines) out at their edges.
     std::vector<std::uint8_t> colors;
