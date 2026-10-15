@@ -274,6 +274,36 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
   Buffers with only a position are shadow hulls (`veh_Shadow.fx`).
 - 1,539 of 1,543 models decode; the other 4 contain no geometry.
 - Positions are left-handed (Direct3D: x right, y up, z forward), so viewers mirror x.
+  Triangles (strip order, odd ones flipped) agree with their stored normals in this
+  space, so a viewer that mirrors an axis must also reverse each triangle's corners.
+
+### The whole `Scene` stream ✅
+
+The complete grammar (every record, in Blur.exe's reading order) is implemented in the
+Blender add-on's `blur/scene.py`
+([Blender-Blur-Import-export](https://github.com/C6G3/Blender-Blur-Import-export)), which reads and
+rewrites all 1,744 models' scene streams byte for byte. Top level: `"ARCH"`, u32 1, u32 0,
+`"ARCH"`, u32 version, u32 1; the scene object (`FUN_006ec040`: root `CullNode`, vertex
+declarations, effect names, keyed textures, content, scene objects); u32 package count,
+then per package 10 level blocks (`FUN_006ea2a0`): level 0 holds the vertex buffers, index
+buffers and objects (`CullNode` "Model*"/"Static" and `RenderListNode_Common`), every level
+holds texture copies (one size each). Facts checked over every model:
+
+- **Geometry record** (render list "static" list): `RA01`, u32 w[5] = material (effect
+  number), ?, ?, index buffer slot, element | flags << 16; two MaterialIndex records; a
+  states record (primitive type 5 = strip); the draw ranges; the passes. The index buffer
+  slot indexes the render list's `ib` vector of (package, buffer). Each pass is `RA00` +
+  u32 [vertex buffer slot, ?, byte offset, ?] + MaterialIndex (value set, process type);
+  pass 0's slot indexes the render list's `vb` vector, and byte offset / stride is the
+  part's first vertex. 15,387 of 15,399 parts matched against the old solver.
+- **Draw ranges**: start, count, min index, vertex count — min/count are exactly the
+  indices used. Unused level: count 0, min 0x7FFFFFFF, vertex count 0. Index buffers are
+  always 16-bit triangle strips.
+- **Bounds**: render list `bounds_a[i]` is the box around static part i's vertices
+  (99.4 %; the rest are larger), then draw distance min/max.
+- **Buffers stored with record version 0** (two old models, e.g. `bluefencing.model`) hold
+  their bytes directly after the count (stride × count, or 2/4 × count for indices)
+  instead of in an aligned blob.
 
 ### Vertex elements, materials and textures
 

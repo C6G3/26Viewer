@@ -22,8 +22,8 @@
 // solved from the constraints (every group using that number must fit, and a
 // buffer belongs to one number). Vertex buffers holding only a position are
 // shadow hulls (veh_Shadow.fx on cars); they are marked as such when there is real
-// geometry. Indices are triangle strips stitched with degenerate triangles, or
-// plain lists. Element 0 of a vertex is the position: 3 floats (12/16 bytes)
+// geometry. Indices are triangle strips stitched with degenerate triangles (in
+// every model). Element 0 of a vertex is the position: 3 floats (12/16 bytes)
 // or 4 halves (8 bytes).
 //
 // Each vertex buffer is preceded by its element list: one record per element,
@@ -1188,23 +1188,16 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
             if (level < group.lods.size()) {
                 const Draw& draw = group.lods[level];
                 const auto slice = std::span(*group.indices).subspan(draw.start, draw.count);
-                // Plain triangle list, or a strip stitched with degenerate triangles?
-                bool list = slice.size() % 3 == 0;
-                for (std::size_t i = 0; list && i + 2 < slice.size(); i += 3)
-                    if (slice[i] == slice[i + 1] || slice[i + 1] == slice[i + 2] || slice[i] == slice[i + 2])
-                        list = false;
+                // Always a triangle strip (the geometry record's primitive type is 5 in every
+                // model). Short strips can look like lists; reading them as lists drew stray
+                // triangles.
                 const auto emit = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c) {
                     if (a == b || b == c || a == c)
                         return; // degenerate (strip stitching)
                     mesh.indices.insert(mesh.indices.end(), {base + a, base + b, base + c});
                 };
-                if (list) {
-                    for (std::size_t i = 0; i + 2 < slice.size(); i += 3)
-                        emit(slice[i], slice[i + 1], slice[i + 2]);
-                } else {
-                    for (std::size_t i = 0; i + 2 < slice.size(); ++i) // strips alternate winding
-                        i % 2 ? emit(slice[i], slice[i + 2], slice[i + 1]) : emit(slice[i], slice[i + 1], slice[i + 2]);
-                }
+                for (std::size_t i = 0; i + 2 < slice.size(); ++i) // strips alternate winding
+                    i % 2 ? emit(slice[i], slice[i + 2], slice[i + 1]) : emit(slice[i], slice[i + 1], slice[i + 2]);
             }
             range.indexCount = static_cast<std::uint32_t>(mesh.indices.size()) - range.firstIndex;
             part.lods.push_back(range);
