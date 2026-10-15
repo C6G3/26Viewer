@@ -26,6 +26,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <functional>
@@ -322,7 +323,11 @@ void ModelCanvas::buildGrid(const QVector3D& lo, const QVector3D& hi)
     const int z0 = static_cast<int>(from(lo.z())), z1 = static_cast<int>(to(hi.z()));
     std::vector<float> minor, major;
     const auto line = [](std::vector<float>& out, float ax, float az, float bx, float bz, float y) {
-        out.insert(out.end(), {ax, y, az, 0, 1, 0, 0, 0, 0, 0, 1, bx, y, bz, 0, 1, 0, 0, 0, 0, 1});
+        // kFloats per point: position, normal (up), uv, lightmap uv, alpha
+        const std::array<float, kFloats> a{ax, y, az, 0, 1, 0, 0, 0, 0, 0, 1};
+        const std::array<float, kFloats> b{bx, y, bz, 0, 1, 0, 0, 0, 0, 0, 1};
+        out.insert(out.end(), a.begin(), a.end());
+        out.insert(out.end(), b.begin(), b.end());
     };
     for (int i = x0; i <= x1; ++i)
         line(i % 5 ? minor : major, i * spacing, z0 * spacing, i * spacing, z1 * spacing, m_ground);
