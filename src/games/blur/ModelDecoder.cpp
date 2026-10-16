@@ -22,8 +22,10 @@
 // solved from the constraints (every group using that number must fit, and a
 // buffer belongs to one number). Vertex buffers holding only a position are
 // shadow hulls (veh_Shadow.fx on cars); they are marked as such when there is real
-// geometry. Indices are triangle strips stitched with degenerate triangles (in
-// every model). Element 0 of a vertex is the position: 3 floats (12/16 bytes)
+// geometry. Each group's geometry record says whether its indices are a triangle
+// strip (stitched with degenerate triangles; most parts) or a plain triangle list
+// (about 2,700 parts, e.g. the Viper's reversing lights and back indicators).
+// Element 0 of a vertex is the position: 3 floats (12/16 bytes)
 // or 4 halves (8 bytes).
 //
 // Each vertex buffer is preceded by its element list: one record per element,
@@ -171,6 +173,7 @@ struct Group {
     std::optional<Stream> stream;
     int element = -1;            ///< MdlDat element it belongs to (its name and placement).
     std::uint32_t material = 0;  ///< Material slot.
+    std::uint32_t primitive = 1; ///< 0 triangle list, 1 triangle strip, 2 points (nothing to draw).
     int values = -1;             ///< Its material's values (index into the value table), or -1.
     std::vector<int> passValues; ///< Every pass's values (the first is `values`; skinned parts keep their bones in another).
     std::uint32_t highestIndex = 0;
@@ -1023,10 +1026,11 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
                 if (!g.passValues.empty())
                     g.values = g.passValues.front();
             }
-            // Before the group: "RA" 01 00, u32 material, u32 ?, u32 ?, u32 ?, u32 element
-            // (low 16 bits; the high bits are flags).
+            // Before the group: "RA" 01 00, u32 material, u32 ?, u32 primitive, u32 index
+            // buffer slot, u32 element (low 16 bits; the high bits are flags).
             if (const std::size_t first = g.lods.front().at; first >= 0x54 && s.isRA(first - 0x54, 1)) {
                 g.material = s.u32(first - 0x50);
+                g.primitive = s.u32(first - 0x48);
                 g.element = static_cast<int>(s.u32(first - 0x40) & 0xFFFF);
             }
             for (const Draw& lod : g.lods) {
@@ -1188,16 +1192,22 @@ Result<Mesh> ModelDecoder::decode(ByteSpan d) const
             if (level < group.lods.size()) {
                 const Draw& draw = group.lods[level];
                 const auto slice = std::span(*group.indices).subspan(draw.start, draw.count);
-                // Always a triangle strip (the geometry record's primitive type is 5 in every
-                // model). Short strips can look like lists; reading them as lists drew stray
-                // triangles.
+                // The geometry record says how the indices are drawn (Blur.exe FUN_006e5310
+                // turns it into the Direct3D primitive): a strip or a plain list. It can't be
+                // told from the indices — short strips look like lists.
                 const auto emit = [&](std::uint32_t a, std::uint32_t b, std::uint32_t c) {
                     if (a == b || b == c || a == c)
                         return; // degenerate (strip stitching)
                     mesh.indices.insert(mesh.indices.end(), {base + a, base + b, base + c});
                 };
-                for (std::size_t i = 0; i + 2 < slice.size(); ++i) // strips alternate winding
-                    i % 2 ? emit(slice[i], slice[i + 2], slice[i + 1]) : emit(slice[i], slice[i + 1], slice[i + 2]);
+                if (group.primitive == 0) {
+                    for (std::size_t i = 0; i + 2 < slice.size(); i += 3)
+                        emit(slice[i], slice[i + 1], slice[i + 2]);
+                } else if (group.primitive == 1) {
+                    for (std::size_t i = 0; i + 2 < slice.size(); ++i) // strips alternate winding
+                        i % 2 ? emit(slice[i], slice[i + 2], slice[i + 1])
+                              : emit(slice[i], slice[i + 1], slice[i + 2]);
+                }
             }
             range.indexCount = static_cast<std::uint32_t>(mesh.indices.size()) - range.firstIndex;
             part.lods.push_back(range);

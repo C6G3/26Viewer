@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <set>
 
 using namespace viewer;
@@ -341,10 +342,29 @@ struct SceneWriter {
         std::uint32_t start, count, minIndex, vertices;
     };
     /// A group of draws (levels of detail) and its vertex stream (buffer number, byte offset),
-    /// optionally followed by unused LOD slots (empty draws, minIndex 0x7FFFFFFF).
+    /// optionally followed by unused LOD slots (empty draws, minIndex 0x7FFFFFFF). With a
+    /// primitive (0 list, 1 strip, 2 points), the geometry record goes in front, as in the game:
+    /// "RA" 01 00 + material, ?, primitive, index buffer slot, element; two MaterialIndex
+    /// records; the states record.
     void group(const std::vector<DrawSpec>& lods, std::uint32_t bufferNumber, std::uint32_t byteOffset,
-               std::uint32_t emptySlots = 0)
+               std::uint32_t emptySlots = 0, std::optional<std::uint32_t> primitive = std::nullopt)
     {
+        if (primitive) {
+            w.put("RA");
+            w.put<std::uint16_t>(1);
+            for (auto v : {0u, 2u, *primitive, 0u, 0u})
+                w.put<std::uint32_t>(v);
+            for (int i = 0; i < 2; ++i) {
+                w.put("RA");
+                w.put<std::uint16_t>(0);
+                w.put<std::uint32_t>(0);
+                w.put<std::uint32_t>(0);
+            }
+            w.put("RA");
+            w.put<std::uint16_t>(0);
+            for (auto v : {1u, 5u, 0u, 0u, 1u, 0u})
+                w.put<std::uint32_t>(v);
+        }
         w.put("RA");
         w.put<std::uint16_t>(0);
         w.put<std::uint32_t>(static_cast<std::uint32_t>(lods.size() + emptySlots));
@@ -392,6 +412,30 @@ TEST_CASE("Blur models: vertex/index buffers and a stitched strip")
     // Strip winding alternates: (0,1,2) then (1,3,2).
     CHECK(std::vector<std::uint32_t>(mesh->indices.begin(), mesh->indices.end())
           == std::vector<std::uint32_t>{0, 1, 2, 1, 3, 2});
+}
+
+TEST_CASE("Blur models: the geometry record says strip, list or points")
+{
+    // The same six indices drawn three ways. As a list: (0,1,2) and (1,3,2). As a strip:
+    // three triangles (one is degenerate). Points: nothing. Like the Viper's reversing
+    // lights, list parts can't be told from strips by their indices.
+    SceneWriter s;
+    s.vertexBuffer({{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}});
+    s.indexBuffer({0, 1, 2, 1, 3, 2, 0, 1, 2, 1, 3, 2, 0, 1, 2, 1, 3, 2});
+    s.group({{0, 6, 0, 4}}, 0, 0, 0, 0u);  // list
+    s.group({{6, 6, 0, 4}}, 0, 0, 0, 1u);  // strip
+    s.group({{12, 6, 0, 4}}, 0, 0, 0, 2u); // points
+
+    auto mesh = ModelDecoder().decode(s.w.bytes);
+    REQUIRE(mesh);
+    REQUIRE(mesh->parts.size() == 2); // the points part draws no triangles, so it isn't a part
+    const auto triangles = [&](const Mesh::Part& p) {
+        const Mesh::Range& r = p.lods[0];
+        return std::vector<std::uint32_t>(mesh->indices.begin() + r.firstIndex,
+                                          mesh->indices.begin() + r.firstIndex + r.indexCount);
+    };
+    CHECK(triangles(mesh->parts[0]) == std::vector<std::uint32_t>{0, 1, 2, 1, 3, 2});
+    CHECK(triangles(mesh->parts[1]) == std::vector<std::uint32_t>{0, 1, 2, 2, 1, 3, 1, 2, 3});
 }
 
 TEST_CASE("Blur models: sub-meshes share a buffer via stream offsets; each keeps its LODs")
