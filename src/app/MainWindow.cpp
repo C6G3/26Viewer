@@ -11,6 +11,8 @@
 #include "SettingsDialog.hpp"
 #include "Theme.hpp"
 #include "VfsModel.hpp"
+#include "HashWindow.hpp"
+#include "McpWindow.hpp"
 #include "PreviewWindow.hpp"
 #include "TextureBrowser.hpp"
 #include "TextEditorWindow.hpp"
@@ -335,7 +337,7 @@ void MainWindow::buildActions()
     auto* showFiles = new QAction(tr("Show &Files in Tree"), this);
     showFiles->setCheckable(true);
     showFiles->setChecked(QSettings().value("view/treeShowsFiles", true).toBool());
-    showFiles->setStatusTip(tr("Off: the tree lists only folders and archives, like OpenIV"));
+    showFiles->setStatusTip(tr("Off: the tree lists only folders and archives"));
     m_treeFilter->setContainersOnly(!showFiles->isChecked());
     connect(showFiles, &QAction::toggled, this, [this](bool on) {
         QSettings().setValue("view/treeShowsFiles", on);
@@ -360,6 +362,18 @@ void MainWindow::buildActions()
     connect(collapse, &QAction::triggered, this, [this] { m_tree->collapseAll(); });
     view->addSeparator();
     m_theme.populateMenu(view->addMenu(tr("&Theme")));
+
+    QMenu* tools = menuBar()->addMenu(tr("&Tools"));
+    m_hashesAction = tools->addAction(icons::theme(TI::EditFind, QStyle::SP_FileDialogContentsView), tr("&Hashes…"));
+    m_hashesAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_H));
+    m_hashesAction->setStatusTip(tr("The game's names and numbers: what a text name or archive path hashes to, "
+                                    "and which name a number like 0x020ba8de stands for"));
+    m_hashesAction->setEnabled(false);
+    connect(m_hashesAction, &QAction::triggered, this, &MainWindow::showHashes);
+    tools->addSeparator();
+    QAction* mcp = tools->addAction(icons::theme(TI::NetworkWired, QStyle::SP_DriveNetIcon), tr("&AI Assistant (MCP)…"));
+    mcp->setStatusTip(tr("Connect Claude, VS Code's Copilot or another AI assistant to this game"));
+    connect(mcp, &QAction::triggered, this, &MainWindow::showMcp);
 
     QMenu* help = menuBar()->addMenu(tr("&Help"));
     QAction* about = help->addAction(icons::theme(TI::HelpAbout, QStyle::SP_MessageBoxInformation),
@@ -808,6 +822,12 @@ void MainWindow::setSession(std::shared_ptr<Session> session)
         w->rebind(nullptr, nullptr);
     m_model->setRoots({}, nullptr);
     m_session = std::move(session);
+    if (m_hashWindow)
+        m_hashWindow->setSession(m_session);
+    if (m_hashesAction)
+        m_hashesAction->setEnabled(m_session && m_session->content.hashTool());
+    if (m_mcpWindow)
+        m_mcpWindow->setSession(m_session);
     if (m_session) {
         std::vector<VfsModel::Root> roots{mainRoot(*m_session)};
         for (const auto& extra : m_session->extras)
@@ -885,7 +905,35 @@ void MainWindow::showForScreenshot(const QString& name)
         m_recentMenu->popup(mapToGlobal(QPoint(40, 40)));
     } else if (name == "settings") {
         showSettings();
+    } else if (name == "hashes") {
+        showHashes();
+        m_hashWindow->search(QStringLiteral("Viper ACR"));
+    } else if (name == "mcp") {
+        showMcp();
+        m_mcpWindow->test();
     }
+}
+
+void MainWindow::showHashes()
+{
+    if (!m_hashWindow) {
+        m_hashWindow = new HashWindow(this);
+        m_hashWindow->setSession(m_session);
+    }
+    m_hashWindow->show();
+    m_hashWindow->raise();
+    m_hashWindow->activateWindow();
+}
+
+void MainWindow::showMcp()
+{
+    if (!m_mcpWindow) {
+        m_mcpWindow = new McpWindow(this);
+        m_mcpWindow->setSession(m_session);
+    }
+    m_mcpWindow->show();
+    m_mcpWindow->raise();
+    m_mcpWindow->activateWindow();
 }
 
 void MainWindow::showSettings()
@@ -1089,6 +1137,7 @@ PreviewWindow* MainWindow::openPreview(const VfsNode* node, bool properties)
             exportNodes({n}, w);
     });
     connect(w, &PreviewWindow::importRequested, this, [this, w] { importNode(w->node(), w); });
+    connect(w, &PreviewWindow::hashesRequested, this, &MainWindow::showHashes);
     connect(w, &PreviewWindow::replaceSoundRequested, this, [this, w](int index) { replaceSound(w, index); });
     connect(w, &PreviewWindow::replaceTextureRequested, this,
             [this, w](int index, const QString& file) { replaceTexture(w, index, file); });

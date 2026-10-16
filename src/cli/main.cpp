@@ -1,6 +1,7 @@
 // 26viewer-cli — scriptable front-end over the same core + game modules the
 // GUI uses. Handy for bulk extraction, CI checks and format research.
 
+#include "McpServer.hpp"
 #include "games/GameModules.hpp"
 #include "viewer/core/GameRegistry.hpp"
 #include "viewer/core/Mesh.hpp"
@@ -10,12 +11,15 @@
 #include <format>
 
 #include <chrono>
+#include <iostream>
 #include <filesystem>
 #include <print>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h>
 #include <shellapi.h>
 #endif
@@ -79,7 +83,14 @@ Usage:
                                                   with <out>, also write sounds as .wav and models as .obj
   26viewer-cli decompile <archive|game dir> [filter] [out]
                                                   Turn binary data (Blur audio entities) into text:
-                                                  printed, or written as .txt files under <out>)");
+                                                  printed, or written as .txt files under <out>
+  26viewer-cli hash <archive|game dir> <name or number>
+                                                  The game's numbers for a name (text ids, archive
+                                                  path hashes), or the names behind a number
+  26viewer-cli mcp <archive|game dir> [--allow-edits]
+                                                  Run as an MCP server for AI assistants (Claude,
+                                                  VS Code, Cursor…) over stdin/stdout; read-only
+                                                  unless --allow-edits)");
     return 2;
 }
 
@@ -370,6 +381,39 @@ int cmdDecompile(const fs::path& target, const std::string& filter, const fs::pa
     return failures ? 1 : 0;
 }
 
+int cmdHash(const fs::path& target, const std::string& query)
+{
+    Session s;
+    auto root = mount(s, target);
+    if (!root) {
+        std::println(stderr, "error: {}", root.error().message);
+        return 1;
+    }
+    const HashTool* tool = s.content.hashTool();
+    if (!tool) {
+        std::println(stderr, "error: this game has no hash tool");
+        return 1;
+    }
+    const auto matches = tool->lookup(query, s.vfs.hashToolContext());
+    for (const HashMatch& m : matches)
+        std::println("{:<24} {:<34} {}", m.kind, m.value, m.note);
+    return matches.empty() ? 1 : 0;
+}
+
+int cmdMcp(const fs::path& target, bool allowEdits)
+{
+#ifdef _WIN32
+    // Messages are UTF-8 lines: no CR/LF translation of the text mode.
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    std::println(stderr, "26viewer MCP server on {} ({}); waiting for a client on stdin", toUtf8(target),
+                 allowEdits ? "edits allowed" : "read-only");
+    mcp::Server server({target, allowEdits, VIEWER_VERSION});
+    server.run(std::cin, std::cout);
+    return 0;
+}
+
 int cmdMedia(const fs::path& target, const std::string& filter, const fs::path& outDir)
 {
     Session s;
@@ -477,6 +521,10 @@ int main(int argc, char** argv)
         return cmdDecompile(toPath(args[2]), arg(3), args.size() >= 5 ? toPath(args[4]) : fs::path{});
     if (cmd == "media")
         return cmdMedia(toPath(args[2]), arg(3), args.size() >= 5 ? toPath(args[4]) : fs::path{});
+    if (cmd == "mcp")
+        return cmdMcp(toPath(args[2]), args.size() >= 4 && args[3] == "--allow-edits");
+    if (cmd == "hash" && args.size() >= 4)
+        return cmdHash(toPath(args[2]), args[3]);
     if (cmd == "replace" && args.size() >= 5)
         return cmdReplace(toPath(args[2]), args[3], toPath(args[4]));
     return usage();

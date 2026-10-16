@@ -254,6 +254,54 @@ Result<ByteBuffer> Vfs::read(const VfsNode& node, std::uint64_t limit) const
     return readFile(node.diskPath(), limit);
 }
 
+HashToolContext Vfs::hashToolContext() const
+{
+    // The archives in the tree (the game folder itself counts for loose files).
+    const auto archives = [this] {
+        std::vector<const VfsNode*> out{m_root.get()};
+        std::vector<const VfsNode*> stack{m_root.get()};
+        while (!stack.empty()) {
+            const VfsNode* n = stack.back();
+            stack.pop_back();
+            for (const auto& child : n->children()) {
+                if (child->kind() == VfsNode::Kind::Archive)
+                    out.push_back(child.get());
+                else if (child->kind() == VfsNode::Kind::Folder)
+                    stack.push_back(child.get());
+            }
+        }
+        return out;
+    };
+    HashToolContext context;
+    context.readFolder = [this, archives](std::string_view folder) {
+        std::vector<DecompileContext::File> files;
+        for (const VfsNode* archive : archives()) {
+            auto found = decompileContext(*archive).readFolder(folder);
+            std::ranges::move(found, std::back_inserter(files));
+        }
+        return files;
+    };
+    context.archivePaths = [archives] {
+        std::vector<std::string> paths;
+        for (const VfsNode* archive : archives()) {
+            if (archive->kind() != VfsNode::Kind::Archive)
+                continue;
+            std::vector<const VfsNode*> stack{archive};
+            while (!stack.empty()) {
+                const VfsNode* n = stack.back();
+                stack.pop_back();
+                for (const auto& child : n->children()) {
+                    paths.push_back(child->pathRelativeTo(archive));
+                    if (child->isContainer())
+                        stack.push_back(child.get());
+                }
+            }
+        }
+        return paths;
+    };
+    return context;
+}
+
 DecompileContext Vfs::decompileContext(const VfsNode& node) const
 {
     const VfsNode* base = &node;

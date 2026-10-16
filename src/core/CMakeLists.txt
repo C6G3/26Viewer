@@ -19,6 +19,7 @@ add_library(viewer_core STATIC
     include/viewer/core/GameRegistry.hpp
     include/viewer/core/Hash.hpp
     include/viewer/core/Image.hpp
+    include/viewer/core/Json.hpp
     include/viewer/core/Mesh.hpp
     include/viewer/core/RandomAccessFile.hpp
     include/viewer/core/Text.hpp
@@ -37,6 +38,7 @@ add_library(viewer_core STATIC
     src/Hash.cpp
     src/Image.cpp
     src/ImageEncode.cpp
+    src/Json.cpp
     src/Mesh.cpp
     src/RandomAccessFile.cpp
     src/Text.cpp

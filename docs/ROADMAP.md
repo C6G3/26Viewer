@@ -37,7 +37,7 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 3. [x] Windows resources: `.ico` app icon (rendered from SVG at build time by `tools/icongen`) + VERSIONINFO
 4. [x] Reopen the last game + selection at start-up (settings in `%APPDATA%\26Viewer\26Viewer.ini`)
    - [x] Recent games / archives / folders menu (File ▸ Open Recent, ten entries, missing ones greyed)
-4a. [x] OpenIV-style browsing: folder/archive tree → contents list → double-click to preview,
+4a. [x] Explorer-style browsing: folder/archive tree → contents list → double-click to preview,
    Backspace back, clickable path bar, search within the open folder, Properties (`Alt+Enter`)
    - [x] Previews open in their own windows (toolbar for per-file tools, drop-to-replace)
    - [x] Game's .exe icon on the tree's top node; optional files in the tree
@@ -45,7 +45,7 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
    - [x] Per-file Export / Import buttons in the preview window
    - [x] Per-file tools in the preview window: image channels, mip selector (item 7)
 4b. [x] Replace assets in place (dialog, toolbar, drag & drop), Restore Original
-   - [x] Edit Mode toggle (OpenIV-style, confirmation, status badge) gating all writes
+   - [x] Edit Mode toggle (confirmation, status badge) gating all writes
    - [x] Explicit backups: red "not backed up" banner + Back Up Now; no automatic backups
    - [x] Backups kept in `<game>/backup/` (same layout; old `.bak` files still recognised);
      Restore Original on a file inside an archive puts back just that file
@@ -107,6 +107,8 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 5. [x] Data tables (`.bin`, `.xt` "Flask" packs incl. car handling; `.loc` texts) → decompiled text
    - [x] Editable: Edit on any decompiled view; Save compiles the values back (core `TextEdit`)
    - [x] Longer/shorter lists in data tables (new items copy the last one, with its linked objects)
+   - [x] Text ids shown and typed as names (`VEH_MOD_VIPERACR`); new texts added to `.loc` tables
+   - [x] Hashes window / `26viewer-cli hash`: text names, ids and archive path hashes both ways
    - [ ] New or deleted records; first item of an empty list of links
    - [ ] Test edited gamedata in-game (gamedata.pak has a .sig file)
    - [ ] `.aid` AI route data
@@ -120,6 +122,10 @@ multi-game asset viewer. Each phase leaves the app shippable. Tick boxes as you 
 7. [x] PAK hashes (recovered from Blur.exe, see docs/formats/blur.md): digest = SHA-1(stored),
    content hash = Σ ~CRC-32 per 32 KiB block, name hash = ~CRC-32 of the lower-case `\path`
 8. [ ] Add new files to archives (full repack: grow name table + file table, keep entries sorted by name hash)
+9. [x] MCP server (`26viewer-cli mcp`, `src/mcp/`): AI assistants list, read (decompiled), search,
+   look up hashes, inspect models and extract; `--allow-edits` adds backup / edit_text / replace_file
+   (writes still need a backup). Own small JSON reader/writer in core (`viewer/core/Json.hpp`)
+   — app: *Tools ▸ AI Assistant (MCP)…* shows the settings for Claude Code / Claude Desktop / VS Code to copy, and tests the connection
 
 ## Phase 5 — Multi-game platform
 

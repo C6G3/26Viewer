@@ -46,6 +46,11 @@ void ContentRegistry::addDrawingDecoder(std::shared_ptr<const DrawingDecoder> de
     m_drawingDecoders.push_back(std::move(decoder));
 }
 
+void ContentRegistry::addHashTool(std::shared_ptr<const HashTool> tool)
+{
+    m_hashTool = std::move(tool); // one per game: the active game's
+}
+
 void ContentRegistry::addSoundBankFormat(std::shared_ptr<const SoundBankFormat> format)
 {
     m_soundBankFormats.push_back(std::move(format));

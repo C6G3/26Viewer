@@ -11,6 +11,8 @@ add_library(viewer_game_blur STATIC
     ChunkFile.cpp
     ChunkFile.hpp
     FlaskTable.cpp
+    HashTool.cpp
+    HashTool.hpp
     FlaskTable.hpp
     FontFile.cpp
     FontFile.hpp

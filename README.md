@@ -2,7 +2,7 @@
 
 A modern, modular **game archive viewer** for Windows, written in C++23 with Qt 6.
 Pick a game, point it at the install folder, and browse every packed and loose
-file like in OpenIV — with texture previews, a hex view, chunk-structure inspection
+file — with texture previews, a hex view, chunk-structure inspection
 and bulk extraction.
 
 The first supported game is **Blur** (Bizarre Creations, 2010). The code is split
@@ -17,7 +17,7 @@ system, image decoders, the UI — is shared by every future game module.
 
 - **Game picker** at start-up: choose a game, browse to its folder, the app
   checks it really is that game's install and remembers it.
-- **Explorer-style browsing** (like OpenIV / RPF Explorer): the tree on the left
+- **Explorer-style browsing**: the tree on the left
   shows the install (with the game's own icon) and every archive opens like a
   folder; the list on the right shows what's inside the selected folder or
   archive. **Double-click** (or `Enter`) enters a folder or opens a file;
@@ -59,13 +59,18 @@ system, image decoders, the UI — is shared by every future game module.
     with links resolved to component names; the Structure tab lists the components.
   - **Blur game data** (`gamedata/xt/*.bin`, `levels/*/actorpack.xt`): every table the
     game is tuned with as readable text — car handling (`racingphysics.bin`), vehicles,
-    career, multiplayer, pickups, UI… — with text ids shown as their English text;
-    `.loc` text tables with all five languages.
+    career, multiplayer, pickups, UI… — with text ids shown by their name and English
+    text (`LocString = VEH_MOD_VIPERACR /* "Viper ACR" */`; type another name, or an id,
+    to change one); `.loc` text tables with all five languages, where new texts can be
+    added (a name line and its texts; 26Viewer gives it an id).
   - **Editing decompiled files**: *Edit* on a decompiled view (game data, texts,
     audio entities, the UI font table) opens its text; change the values and *Save*
     compiles them back into the file (through Edit Mode). Names and brackets must
     stay; in game data tables lists can also get more or fewer items. A note above
     the text says what can change, and a mistake names its line.
+  - **Hashes…** (Tools menu, `Ctrl+Shift+H`, or the preview toolbar): the game's names
+    and numbers both ways — a text's name or English text → its id, an id → its name,
+    an archive path → its `.pak` name hash and back.
   - **Text** with line numbers, find, and colour coding (XML, INI, CSV, JSON, Lua,
     shaders, QuickBMS). *Edit* opens a text editor; saving goes through Edit Mode.
 - **Extraction** of a selection or everything, on a background thread with
@@ -75,7 +80,7 @@ system, image decoders, the UI — is shared by every future game module.
   `.wav` files, models → `.obj` (other 3D files keep their extension:
   `Level.levelphysics.obj`), textures → `.png`, `.dds`, `.jpg` or `.bmp`
   (you choose; `.dds` keeps the game's own compressed pixels for re-importing).
-- **Edit Mode** (like OpenIV): off at every start; turning it on (`Ctrl+M`)
+- **Edit Mode**: off at every start; turning it on (`Ctrl+M`)
   asks for confirmation and shows a red **EDIT MODE** badge. Only then can you:
   - **Replace assets** with your own files — *Edit ▸ Replace…* (`Ctrl+R`), the
     toolbar button, or drag a file from Explorer onto an item. The file type must
@@ -107,8 +112,12 @@ system, image decoders, the UI — is shared by every future game module.
   *live* (or forced via *View ▸ Theme*), Fluent icons, dark title bar,
   per-monitor high-DPI.
 - **CLI** (`26viewer-cli`) for scripted listing, verification, extraction,
-  `decompile` (game data, texts, audio entities → text) and `replace` (an edited
-  `.txt` from `decompile` is compiled back).
+  `decompile` (game data, texts, audio entities → text), `replace` (an edited
+  `.txt` from `decompile` is compiled back) and `hash` (a name's ids and hashes, or
+  the names behind a number).
+- **AI assistant access (MCP)**: `26viewer-cli mcp` lets Claude, VS Code's
+  Copilot agent mode, Cursor and other MCP clients browse, read, search and
+  (only when you allow it) edit the game — see [Using it with an AI assistant](#using-it-with-an-ai-assistant-mcp).
 
 ## Supported games
 
@@ -142,6 +151,8 @@ Run `build/release/bin/26Viewer.exe` (or `dist/release/26Viewer.exe`).
 26viewer-cli extract "F:/Games/BLUR/cache/root.pak" out/ graphics/textures
 26viewer-cli backup  "F:/Games/BLUR/cache/root.pak"
 26viewer-cli replace "F:/Games/BLUR/cache/root.pak" graphics/textures/flags/amboyflag.texture my_flag.texture
+26viewer-cli hash    "F:/Games/BLUR" VEH_MOD_VIPERACR
+26viewer-cli mcp     "F:/Games/BLUR"
 ```
 
 > **Modding note (Blur):** replaced files are written with the same checksums
@@ -151,6 +162,72 @@ Run `build/release/bin/26Viewer.exe` (or `dist/release/26Viewer.exe`).
 
 The GUI also accepts a path (`26Viewer.exe F:\Games\BLUR`), and
 `--select <virtual path> --theme dark --edit-mode --screenshot out.png` for scripted UI captures.
+
+### Using it with an AI assistant (MCP)
+
+`26viewer-cli mcp <game dir>` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server: an AI assistant starts it in the background and calls its tools to work
+on the game for you ("find every file that mentions the Viper", "what is text
+0xd2266d99?", "rename the Viper to My Viper").
+
+| Tool | What it does |
+|---|---|
+| `overview` | The game, its archives and how many files of each kind |
+| `list_files` | Files under a folder, filtered by name |
+| `read_file` | A file as text (game data decompiled, numbered lines), or its first bytes in hex |
+| `search_text` | Search the text of every text/data file |
+| `lookup` | Names ↔ text ids and archive path hashes (same as *Tools ▸ Hashes…*) |
+| `model_info` | A model's hierarchy, parts, materials and textures |
+| `extract` | Copy files out to a folder |
+| `backup` · `edit_text` · `replace_file` | Only with `--allow-edits` (below) |
+
+**Edits are off by default.** Add `--allow-edits` to offer the three writing
+tools. Even then nothing is written until the archive has a backup — the
+assistant has to call `backup` first, exactly like Edit Mode in the app.
+
+The easiest way: in the app, open **Tools ▸ AI Assistant (MCP)…**. It shows the
+server program and the open game, the ready-made settings below for each
+assistant (with Copy buttons and an *Allow edits* checkbox) and a **Test
+Connection** button that starts the server and lists its tools.
+
+By hand: use the full path of the CLI in `dist/release/` (after `cmake --install build/release`).
+
+**Claude Code** (one command, in a terminal):
+
+```bash
+claude mcp add 26viewer -- "F:/project 2/26Viewer/dist/release/26viewer-cli.exe" mcp "F:/Games/BLUR"
+```
+
+**Claude Desktop** — *Settings ▸ Developer ▸ Edit Config* opens
+`claude_desktop_config.json`; add:
+
+```json
+{
+  "mcpServers": {
+    "26viewer": {
+      "command": "F:/project 2/26Viewer/dist/release/26viewer-cli.exe",
+      "args": ["mcp", "F:/Games/BLUR"]
+    }
+  }
+}
+```
+
+**VS Code** (Copilot agent mode) — `.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "26viewer": {
+      "type": "stdio",
+      "command": "F:/project 2/26Viewer/dist/release/26viewer-cli.exe",
+      "args": ["mcp", "F:/Games/BLUR"]
+    }
+  }
+}
+```
+
+Add `"--allow-edits"` to `args` to let it change files. Restart the assistant
+after changing its configuration.
 
 ## Project layout
 

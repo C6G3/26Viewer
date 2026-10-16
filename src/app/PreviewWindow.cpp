@@ -64,6 +64,12 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     m_texturesAction->setVisible(false);
     connect(m_texturesAction, &QAction::triggered, this, &PreviewWindow::showTextures);
 
+    m_hashesAction = new QAction(icons::theme(TI::EditFind, QStyle::SP_FileDialogContentsView), tr("&Hashes…"), this);
+    m_hashesAction->setStatusTip(tr("The game's names and numbers: what a text name or archive path hashes to, "
+                                    "and which name a number like 0x020ba8de stands for"));
+    m_hashesAction->setVisible(false);
+    connect(m_hashesAction, &QAction::triggered, this, &PreviewWindow::hashesRequested);
+
     auto* close = new QAction(tr("Close"), this);
     close->setShortcuts({QKeySequence(QKeySequence::Close), QKeySequence(Qt::CTRL | Qt::Key_W),
                          QKeySequence(Qt::Key_Escape)});
@@ -83,6 +89,7 @@ PreviewWindow::PreviewWindow(QWidget* parent) : QMainWindow(parent), m_pane(new 
     toolbar->addAction(m_importAction);
     toolbar->addSeparator();
     toolbar->addAction(m_texturesAction);
+    toolbar->addAction(m_hashesAction);
 
     statusBar(); // shows status tips and drag & drop feedback
     if (!restoreGeometry(QSettings().value("preview/geometry").toByteArray()))
@@ -93,6 +100,7 @@ PreviewWindow::~PreviewWindow() = default;
 
 void PreviewWindow::setSession(std::shared_ptr<Session> session)
 {
+    m_hashesAction->setVisible(session && session->content.hashTool());
     m_pane->setSession(std::move(session));
 }
 

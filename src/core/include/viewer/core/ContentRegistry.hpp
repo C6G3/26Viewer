@@ -133,6 +133,27 @@ public:
     [[nodiscard]] virtual TextSyntax syntax() const noexcept { return TextSyntax::Plain; }
 };
 
+/// One answer of a hash tool: what a name hashes to, or what a number stands for.
+struct HashMatch {
+    std::string kind;  ///< "Text", "Archive path"
+    std::string value; ///< "0x020ba8de", or a name
+    std::string note;  ///< More about it ("\"Silent Running\" in multiplayer.loc")
+};
+
+/// A game's names <-> numbers tool (the app's Hashes window): the hashes and
+/// ids the game uses for names, and the names behind a number where they can
+/// be found (hashes can't be undone, so that's a lookup in the game's files).
+class HashTool {
+public:
+    virtual ~HashTool() = default;
+    [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+    /// A line or two on what it knows, shown above the answers.
+    [[nodiscard]] virtual std::string_view description() const noexcept = 0;
+    /// The answers for `query`: a name or text, or a number (0x… or decimal).
+    [[nodiscard]] virtual std::vector<HashMatch> lookup(std::string_view query,
+                                                        const HashToolContext& context) const = 0;
+};
+
 /// Everything a session knows how to open, decode and describe.
 ///
 /// Built-in (game-agnostic) handlers are registered first by
@@ -154,6 +175,7 @@ public:
     void addAnimationDecoder(std::shared_ptr<const AnimationDecoder> decoder);
     void addFontDecoder(std::shared_ptr<const FontDecoder> decoder);
     void addDrawingDecoder(std::shared_ptr<const DrawingDecoder> decoder);
+    void addHashTool(std::shared_ptr<const HashTool> tool);
 
     /// Finds a format able to open `path` (extension filter, then header probe).
     [[nodiscard]] const ArchiveFormat* findArchiveFormat(const std::filesystem::path& path) const;
@@ -170,6 +192,8 @@ public:
     [[nodiscard]] const DrawingDecoder* findDrawingDecoder(std::string_view extension, ByteSpan data) const;
 
     [[nodiscard]] const auto& archiveFormats() const noexcept { return m_archiveFormats; }
+    /// The game's hash tool, or null if it has none.
+    [[nodiscard]] const HashTool* hashTool() const noexcept { return m_hashTool.get(); }
 
 private:
     FileTypeRegistry m_fileTypes;
@@ -183,6 +207,7 @@ private:
     std::vector<std::shared_ptr<const SkeletonDecoder>> m_skeletonDecoders;
     std::vector<std::shared_ptr<const AnimationDecoder>> m_animationDecoders;
     std::vector<std::shared_ptr<const FontDecoder>> m_fontDecoders;
+    std::shared_ptr<const HashTool> m_hashTool;
     std::vector<std::shared_ptr<const DrawingDecoder>> m_drawingDecoders;
 };
 

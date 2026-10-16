@@ -6,6 +6,7 @@
 #include "Animation.hpp"
 #include "FlaskTable.hpp"
 #include "FontFile.hpp"
+#include "HashTool.hpp"
 #include "Level.hpp"
 #include "Localisation.hpp"
 #include "UiFontTable.hpp"
@@ -73,6 +74,7 @@ public:
         registry.addStructureParser(std::make_shared<AudioEntityStructureParser>());
         registry.addDecompiler(std::make_shared<FlaskDecompiler>());
         registry.addDecompiler(std::make_shared<LocTableDecompiler>());
+        registry.addHashTool(std::make_shared<BlurHashTool>());
 
         auto& t = registry.fileTypes();
         t.add({"pak", "Blur package", FileCategory::Archive});

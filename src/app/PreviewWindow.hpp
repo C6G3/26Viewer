@@ -16,7 +16,7 @@ class PreviewPane;
 class TextureBrowser;
 
 /// A separate window showing one file (opened by double-clicking it in the
-/// folder list), OpenIV-style. Several can be open at once. Its toolbar is the
+/// folder list). Several can be open at once. Its toolbar is the
 /// place for per-file tools and adjustments.
 ///
 /// The window remembers where its file lives (its location), so after the
@@ -68,6 +68,8 @@ signals:
     /// The Export… / Import… buttons.
     void exportRequested();
     void importRequested();
+    /// The Hashes… button: the game's names <-> numbers window.
+    void hashesRequested();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -90,6 +92,7 @@ private:
     QAction* m_exportAction;
     QAction* m_importAction;
     QAction* m_texturesAction; ///< Shown for files holding textures (UI packs, models).
+    QAction* m_hashesAction;   ///< Shown when the game has a hash tool.
     std::function<bool(const VfsNode*)> m_importCheck;
 };
 

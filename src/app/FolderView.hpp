@@ -17,7 +17,7 @@ class BackupBanner;
 class VfsFilterModel;
 class VfsModel;
 
-/// The right-hand folder list (OpenIV / RPF Explorer style): shows what is
+/// The right-hand folder list: shows what is
 /// inside the folder or archive selected in the navigation tree. Double-click
 /// (or Enter) emits `activated` — folders are entered, files previewed.
 ///

@@ -265,8 +265,9 @@ Chunk file `CPModel { Header, MdlDat { Header, StrTab, … }, Models, Element, C
 | draw | `RA00`, u32 start index, u32 index count, u32 min index, u32 vertex count. Unused LOD slots are empty draws (count 0, min index 0x7FFFFFFF): the part isn't drawn at that level |
 | streams | right after a group (and its empty slots): `RA00`, u32 count (1–4), then `RA00`, u32 buffer number, u32 ?, u32 byte offset, u32 ? — byte offset / stride is the group's first vertex |
 
-- Draws tile each index buffer exactly; indices are triangle strips stitched with
-  degenerate triangles, or plain lists.
+- Draws tile each index buffer exactly. Whether a part's indices are a triangle strip
+  (stitched with degenerate triangles) or a plain list is stored in its geometry record
+  (below) — it can't be told from the indices, since short strips look like lists.
 - Buffer numbers are *not* file order: each number's buffer is solved from constraints
   (all groups using it must fit; one buffer per number). Shadow-hull groups carry all-zero
   streams, so a buffer that fits a group exactly wins over the mapped one.
@@ -290,15 +291,19 @@ buffers and objects (`CullNode` "Model*"/"Static" and `RenderListNode_Common`), 
 holds texture copies (one size each). Facts checked over every model:
 
 - **Geometry record** (render list "static" list): `RA01`, u32 w[5] = material (effect
-  number), ?, ?, index buffer slot, element | flags << 16; two MaterialIndex records; a
-  states record (primitive type 5 = strip); the draw ranges; the passes. The index buffer
+  number), ?, **primitive**, index buffer slot, element | flags << 16; two MaterialIndex
+  records; a states record; the draw ranges; the passes. Primitive (Blur.exe
+  `FUN_006e5310` maps it to the Direct3D type): 0 triangle list, 1 triangle strip,
+  2 points. Over every model: 33,958 strip parts and 2,729 list parts (e.g. the Viper's
+  reversing lights and back indicators, in a second index buffer); 93 list parts hold
+  only degenerate triangles. (The states record's 5 is not the primitive.) The index buffer
   slot indexes the render list's `ib` vector of (package, buffer). Each pass is `RA00` +
   u32 [vertex buffer slot, ?, byte offset, ?] + MaterialIndex (value set, process type);
   pass 0's slot indexes the render list's `vb` vector, and byte offset / stride is the
   part's first vertex. 15,387 of 15,399 parts matched against the old solver.
 - **Draw ranges**: start, count, min index, vertex count — min/count are exactly the
   indices used. Unused level: count 0, min 0x7FFFFFFF, vertex count 0. Index buffers are
-  always 16-bit triangle strips.
+  always 16-bit; strip or list per part (the geometry record's primitive).
 - **Bounds**: render list `bounds_a[i]` is the box around static part i's vertices
   (99.4 %; the rest are larger), then draw distance min/max.
 - **Buffers stored with record version 0** (two old models, e.g. `bluefencing.model`) hold
@@ -840,6 +845,17 @@ tables (keys, then each language): u32 count, u32 8,
 ```
 
 The ids are the `LocId` values data tables store.
+
+Ordering (every shipped table): the name table is **sorted by name** (byte order) and
+each language's table **by id**; every language holds exactly the name table's ids;
+strings follow their entries with no padding. `Blur.exe` `0x73EA90` finds a text by
+name with a binary search over the name table (then tries the name + `_PC`) and
+returns the id stored next to it — the game never computes an id from a name, and
+none of the usual hashes (CRC-32 variants, FNV, djb2, sdbm, one-at-a-time, x31/x65599)
+of the names give the ids. A name that is in two tables has the same id in both
+(four multiplayer texts). So a new text can take any id no table uses: 26Viewer takes
+`~crc32(name)`, moved on past ids in use (`newTextId`). Text names are what data
+tables can be edited with (`LocString = VEH_MOD_VIPERACR`).
 
 ## Other files
 

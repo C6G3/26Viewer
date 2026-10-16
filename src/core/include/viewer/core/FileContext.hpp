@@ -27,4 +27,14 @@ struct DecompileContext {
     std::function<std::optional<ByteBuffer>(std::string_view name)> readSibling;
 };
 
+/// What a game's hash tool (HashTool) may consult: the whole open game.
+struct HashToolContext {
+    /// The files of a folder in every open archive and the game folder:
+    /// "gamedata/xt/loc".
+    std::function<std::vector<DecompileContext::File>(std::string_view folder)> readFolder;
+    /// The path of every file and folder inside the open archives, relative to
+    /// its archive, with / separators: "models/vehicles/a.model".
+    std::function<std::vector<std::string>()> archivePaths;
+};
+
 } // namespace viewer

@@ -71,7 +71,7 @@ public:
     /// user turned the option off.
     bool reopenLastSession();
 
-    /// Edit Mode unlocks replacing/restoring (off at every start, like OpenIV).
+    /// Edit Mode unlocks replacing/restoring (off at every start).
     /// With `confirm`, the user must accept a warning before it turns on.
     void setEditMode(bool on, bool confirm = true);
     [[nodiscard]] bool editMode() const noexcept { return m_editMode; }
@@ -143,6 +143,10 @@ private:
     void goToPath();
     /// Edit > Settings.
     void showSettings();
+    /// Tools ▸ Hashes…: the game's names <-> numbers window (one, kept).
+    void showHashes();
+    /// Tools ▸ AI Assistant (MCP)…: how to connect an assistant to the MCP server (one, kept).
+    void showMcp();
 
     // Text editing (TextEditorWindow)
     /// Whether `node` can be opened in the text editor; with `sniff`, files of
@@ -220,6 +224,9 @@ private:
     const GameRegistry& m_games;
     ThemeManager& m_theme;
     std::shared_ptr<Session> m_session;
+    class HashWindow* m_hashWindow = nullptr;
+    QAction* m_hashesAction = nullptr;
+    class McpWindow* m_mcpWindow = nullptr;
     QFutureWatcher<LoadResult>* m_loadWatcher;
     QFutureWatcher<ExtractSummary>* m_extractWatcher;
     QFutureWatcher<EditResult>* m_editWatcher;

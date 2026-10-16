@@ -108,6 +108,10 @@ public:
     /// The context must not outlive this Vfs.
     [[nodiscard]] DecompileContext decompileContext(const VfsNode& node) const;
 
+    /// Lets a game's hash tool look through every open archive (and the game
+    /// folder). The context must not outlive this Vfs.
+    [[nodiscard]] HashToolContext hashToolContext() const;
+
     /// Random access to a file node (big containers: read only what's needed).
     /// The source must not outlive this Vfs.
     [[nodiscard]] static Result<std::shared_ptr<const ByteSource>> source(const VfsNode& node);

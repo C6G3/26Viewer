@@ -20,6 +20,10 @@ qt_add_executable(viewer_app WIN32
     FolderView.hpp
     GamePickerDialog.cpp
     GamePickerDialog.hpp
+    HashWindow.cpp
+    HashWindow.hpp
+    McpWindow.cpp
+    McpWindow.hpp
     Icons.cpp
     Icons.hpp
     ImportExportDialogs.cpp

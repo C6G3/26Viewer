@@ -12,13 +12,14 @@ add_executable(viewer_tests
     test_blur_level.cpp
     test_blur_data.cpp
     test_blur_ui.cpp
+    test_mcp.cpp
     test_media.cpp
     test_text.cpp
     test_vfs.cpp
     TestUtil.hpp
 )
 target_link_libraries(viewer_tests PRIVATE
-    viewer::core viewer_game_blur viewer::options
+    viewer::core viewer_game_blur viewer::mcp viewer::options
     ZLIB::ZLIB Catch2::Catch2WithMain)
 
 include(Catch)

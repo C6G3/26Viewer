@@ -5,14 +5,17 @@
 #include "TestUtil.hpp"
 
 #include "FlaskTable.hpp"
+#include "HashTool.hpp"
 #include "Localisation.hpp"
 #include "PakArchive.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <string>
 
 using namespace viewer;
@@ -335,6 +338,69 @@ TEST_CASE("Blur text tables: keys and translations; ids found by data tables")
     auto restored = loc.recompile(*rebuilt, *text, {});
     REQUIRE(restored);
     CHECK(*restored == w.bytes);
+
+    // A new text: a name line without an id, then its texts. It goes in name
+    // order (the game binary-searches names), with an id nothing else uses; a
+    // language left out takes the first one's text.
+    auto added = loc.recompile(w.bytes, *text + "\nAAA_NEW_CAR\n    en \"My Car\"\n", {});
+    REQUIRE(added);
+    auto withNew = readLocTable(*added);
+    REQUIRE(withNew);
+    REQUIRE(withNew->strings.size() == 2);
+    const std::uint32_t newId = newTextId("AAA_NEW_CAR", {0xABCD});
+    CHECK(newId != 0xABCD);
+    CHECK(withNew->strings[0].key == "AAA_NEW_CAR"); // sorted before CAR_NAME
+    CHECK(withNew->strings[0].id == newId);
+    CHECK(withNew->strings[0].texts == std::vector<std::string>{"My Car", "My Car"});
+    CHECK(withNew->strings[1].key == "CAR_NAME");
+    CHECK(withNew->strings[1].texts[1] == "Voiture");
+    // Its id shows in the listing, and editing that listing keeps it.
+    const std::string newText = loc.decompile(*added).value();
+    CHECK(newText.find(std::format("AAA_NEW_CAR  // id 0x{:08x}", newId)) != std::string::npos);
+    CHECK(loc.recompile(*added, newText, {}).value() == *added);
+    // Same name in another table: the same text, so the same id.
+    DecompileContext elsewhere;
+    elsewhere.readFolder = [&](std::string_view) {
+        return std::vector<DecompileContext::File>{{"other.loc", *added}};
+    };
+    auto shared = loc.recompile(w.bytes, *text + "\nAAA_NEW_CAR\n    en \"Mine\"\n", elsewhere);
+    REQUIRE(shared);
+    CHECK(readLocTable(*shared)->strings[0].id == newId);
+
+    // Refused: removing a text, renaming one, bad or repeated names, unknown languages.
+    const auto refused = [&](const std::string& edit, std::string_view why) {
+        INFO(edit);
+        auto r = loc.recompile(w.bytes, edit, {});
+        REQUIRE_FALSE(r);
+        CHECK(r.error().message.find(why) != std::string::npos);
+    };
+    refused("// Blur text table\n\nNEW_ONE\n    en \"x\"\n", "can't be removed");
+    refused(*text + "\nBAD NAME\n    en \"x\"\n", "can't name a text");
+    refused(*text + "\nCAR_NAME\n    en \"x\"\n", "already has a text called CAR_NAME");
+    refused(*text + "\nOTHER\n    xx \"x\"\n", "no language \"xx\"");
+    std::string renamed = *text + "\nOTHER\n    en \"x\"\n";
+    renamed.replace(renamed.find("CAR_NAME"), 8, "CAR_TITLE");
+    refused(renamed, "can't change");
+}
+
+TEST_CASE("Blur text tables: written the way the game stores them")
+{
+    LocTable table;
+    table.languages = {"en", "fr"};
+    table.strings = {{0x30, "ZED", {"z", "zz"}}, {0x10, "ALPHA", {"a", "aa"}}, {0x20, "", {"no name", "sans nom"}}};
+    const ByteBuffer bytes = writeLocTable(table);
+    auto back = readLocTable(bytes);
+    REQUIRE(back);
+    // The name table in name order, the language tables in id order.
+    REQUIRE(back->strings.size() == 3);
+    CHECK(back->strings[0].key == "ALPHA");
+    CHECK(back->strings[1].key == "ZED");
+    CHECK(back->strings[2].key.empty()); // only in the language tables
+    CHECK(back->strings[2].texts[1] == "sans nom");
+    CHECK(loadScalar<std::uint32_t>(bytes, 0x1C + 16) == 0x1C + 2 * 24 + 8 + 2 * 8 + 6 + 4);
+    CHECK(isTextName("VEH_MOD_VIPERACR"));
+    CHECK_FALSE(isTextName("Viper ACR"));
+    CHECK_FALSE(isTextName(""));
 }
 
 TEST_CASE("Real Blur data tables (set BLUR_DIR to enable)")
@@ -371,6 +437,7 @@ TEST_CASE("Real Blur data tables (set BLUR_DIR to enable)")
                 auto table = readLocTable(data);
                 REQUIRE(table);
                 CHECK(table->languages.size() == 5);
+                CHECK(writeLocTable(*table) == data); // the game's own layout, byte for byte
                 if (path.ends_with("vehicles.loc")) {
                     const LocTableDecompiler loc;
                     const std::string text = loc.decompile(data).value();
@@ -445,6 +512,56 @@ TEST_CASE("Real Blur data tables (set BLUR_DIR to enable)")
         }
         CHECK(tables >= 25);
         CHECK(texts >= 21);
+        if (std::string_view(name) != "gamedata.pak")
+            continue;
+
+        // Text ids shown by name, and a name typed in place of an id.
+        const FlaskDecompiler decompiler;
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (!entries[i].path.ends_with("xt/finalracebook.bin"))
+                continue;
+            const ByteBuffer data = (*pak)->read(i).value();
+            const std::string text = decompiler.decompileWith(data, context).value();
+            const std::size_t at = text.find(" /* \"Carver's Viper GTSR\" */");
+            REQUIRE(at != std::string::npos);
+            const std::size_t equals = text.rfind(" = ", at);
+            const std::string shown = text.substr(equals + 3, at - equals - 3);
+            INFO(shown);
+            CHECK(isTextName(shown));
+            CHECK_FALSE(shown.starts_with("0x"));
+            std::string edited = text;
+            edited.replace(equals + 3, shown.size(), "VEH_MOD_VIPERACR");
+            const std::string again = decompiler.decompileWith(decompiler.recompile(data, edited, context).value(),
+                                                               context).value();
+            CHECK(again.find("= VEH_MOD_VIPERACR /* \"Viper ACR\" */") != std::string::npos);
+            edited.replace(equals + 3, 16, "NOT_A_TEXT_NAME");
+            CHECK_FALSE(decompiler.recompile(data, edited, context));
+        }
+
+        // The hash tool: names <-> numbers, both ways.
+        HashToolContext hashes;
+        hashes.readFolder = context.readFolder;
+        hashes.archivePaths = [&] {
+            std::vector<std::string> paths;
+            for (const ArchiveEntry& e : entries)
+                paths.push_back(e.path);
+            return paths;
+        };
+        const BlurHashTool tool;
+        const auto has = [&](std::string_view query, std::string_view kind, std::string_view value) {
+            INFO(query);
+            const auto found = tool.lookup(query, hashes);
+            CHECK(std::ranges::any_of(found, [&](const HashMatch& m) { return m.kind == kind && m.value == value; }));
+        };
+        has("VEH_MOD_VIPERACR", "Text id", "0xd2266d99");
+        has("0xd2266d99", "Text", "VEH_MOD_VIPERACR");
+        has("d2266d99", "Text", "VEH_MOD_VIPERACR");
+        has("viper acr", "Text with this English", "0xd2266d99");
+        has("gamedata/xt/amax.bin",
+            "Archive path hash", std::format("0x{:08x}", PakArchive::nameHash("\\gamedata\\xt\\amax.bin")));
+        has(std::format("0x{:08x}", PakArchive::nameHash("\\gamedata\\xt\\amax.bin")), "Archive path",
+            "gamedata/xt/amax.bin");
+        has("MY_BRAND_NEW_TEXT", "New text id", std::format("0x{:08x}", newTextId("MY_BRAND_NEW_TEXT", {})));
     }
 }
 

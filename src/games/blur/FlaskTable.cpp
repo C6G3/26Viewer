@@ -111,9 +111,9 @@ struct ListSlot {
 /// Writes one block's objects as text, each editable value marked (EditableText).
 class Printer {
 public:
-    /// `texts`: LocId -> English text; `elsewhere`: record id -> label, for
-    /// the records of other tables.
-    Printer(const FlaskPack& pack, const std::unordered_map<std::uint32_t, std::string>& texts,
+    /// `texts`: what the text tables say about text ids (names, English);
+    /// `elsewhere`: record id -> label, for the records of other tables.
+    Printer(const FlaskPack& pack, const LocIndex& texts,
             const std::unordered_map<std::uint32_t, std::string>& elsewhere, std::vector<Slot>& slots,
             std::vector<ListSlot>& lists)
         : m_pack(pack), m_texts(texts), m_elsewhere(elsewhere), m_slots(slots), m_lists(lists)
@@ -347,11 +347,17 @@ private:
                 else
                     out += "null";
                 break;
-            case 14:
-                editable(v == 0 ? std::string("0") : std::format("0x{:08x}", v));
-                if (const auto it = m_texts.find(v); v != 0 && it != m_texts.end())
+            case 14: {
+                // A text id: its name in the text tables when it has one (typing a
+                // name or a number both work), else the number.
+                const auto name = m_texts.names.find(v);
+                editable(v == 0 ? std::string("0")
+                         : name != m_texts.names.end() ? name->second
+                                                       : std::format("0x{:08x}", v));
+                if (const auto it = m_texts.english.find(v); v != 0 && it != m_texts.english.end())
                     out += std::format(" /* {} */", quotedText(it->second));
                 break;
+            }
             default: editable(std::to_string(v64)); break;
             }
             return;
@@ -404,7 +410,7 @@ private:
     }
 
     const FlaskPack& m_pack;
-    const std::unordered_map<std::uint32_t, std::string>& m_texts;
+    const LocIndex& m_texts;
     const std::unordered_map<std::uint32_t, std::string>& m_elsewhere;
     std::vector<Slot>& m_slots;
     std::vector<ListSlot>& m_lists;
@@ -558,6 +564,7 @@ struct Decompiled {
     std::vector<ListSlot> lists;
     std::vector<std::size_t> ids;    ///< Per value in `text`: its slot.
     std::vector<std::string> labels; ///< Per record, as references show it (when asked for).
+    std::unordered_map<std::string, std::uint32_t> textIds; ///< Text name -> id (gamedata/xt/loc).
 };
 
 Decompiled decompilePack(const FlaskPack& pack, const DecompileContext& context, bool withLabels)
@@ -567,9 +574,10 @@ Decompiled decompilePack(const FlaskPack& pack, const DecompileContext& context,
     const bool usesTexts = std::ranges::any_of(pack.types, [](const FlaskPack::Type& t) {
         return t.kind == 0 && t.primitive == 14;
     });
-    std::unordered_map<std::uint32_t, std::string> texts, elsewhere;
+    LocIndex texts;
+    std::unordered_map<std::uint32_t, std::string> elsewhere;
     if (context.readFolder && usesTexts)
-        texts = englishTexts(context.readFolder("gamedata/xt/loc"));
+        texts = locIndex(context.readFolder("gamedata/xt/loc"));
     if (context.readFolder && pack.records.size() > pack.blocks.size()) {
         for (const DecompileContext::File& file : context.readFolder("gamedata/xt")) {
             auto other = readFlask(file.data);
@@ -592,11 +600,13 @@ Decompiled decompilePack(const FlaskPack& pack, const DecompileContext& context,
     if (const std::size_t external = pack.records.size() - pack.blocks.size())
         out += std::format("// It also refers to {} record(s) defined in other tables{}.\n", external,
                            elsewhere.empty() ? " (shown as #id)" : " (named from gamedata/xt where they have a name)");
-    if (!texts.empty())
-        out += "// Text ids are followed by their English text.\n";
+    if (!texts.names.empty())
+        out += "// Texts are shown by their name in gamedata/xt/loc, then their English text (to change one,\n"
+               "// type another name, or an id like 0x1234abcd); an id without a name stays a number.\n";
 
     Decompiled d;
     Printer printer(pack, texts, elsewhere, d.slots, d.lists);
+    d.textIds = texts.ids;
     for (std::size_t b = 0; b < pack.blocks.size(); ++b) {
         out += '\n';
         printer.block(b, out);
@@ -705,10 +715,24 @@ static Result<ByteBuffer> applyValues(ByteSpan original, std::string_view text, 
                 put(static_cast<std::int64_t>(*n));
                 break;
             }
+            case 14: {
+                // A text: its name in gamedata/xt/loc, or its id as a number.
+                if (const auto it = d.textIds.find(std::string(v)); it != d.textIds.end()) {
+                    put(it->second);
+                    break;
+                }
+                const auto n = parseUnsigned(v);
+                if (!n || *n > 0xFFFFFFFFull)
+                    return bad(d.textIds.empty()
+                                   ? std::string("isn't a text id (a number like 0x1234abcd)")
+                                   : std::string("isn't the name of a text in gamedata/xt/loc, or a text id "
+                                                 "(a number like 0x1234abcd); add new texts to a .loc table first"));
+                put(static_cast<std::uint32_t>(*n));
+                break;
+            }
             case 6:
             case 7:
-            case 8:
-            case 14: {
+            case 8: {
                 const auto n = parseUnsigned(v);
                 const unsigned long long hi = type.primitive == 6 ? 255 : type.primitive == 7 ? 65535 : 0xFFFFFFFFull;
                 if (!n || *n > hi)

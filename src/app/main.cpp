@@ -62,7 +62,7 @@ Options parseArguments(const QApplication& app)
                                                       "optionally @frame)."),
                                        QStringLiteral("path"));
     const QCommandLineOption dialog(QStringLiteral("dialog"),
-                                    QStringLiteral("Screenshot of a dialog or menu instead: goto, recent or settings."),
+                                    QStringLiteral("Screenshot of a dialog or menu instead: goto, recent, settings, hashes or mcp."),
                                     QStringLiteral("name"));
     parser.addOptions({select, tab, theme, screenshot, editMode, animation, camera, dialog});
     parser.process(app);
@@ -96,10 +96,13 @@ void scheduleScreenshot(viewer::app::MainWindow& window, const Options& o)
         if (!o.dialog.isEmpty()) { // the dialog (or menu) itself, once it is up
             if (!o.select.isEmpty())
                 window.selectPath(o.select, /*openFile=*/false);
-            QTimer::singleShot(1200, &window, [file = o.screenshot] {
+            // The MCP window first runs its connection test (the server opens the game).
+            QTimer::singleShot(o.dialog == "mcp" ? 8000 : 1200, &window, [file = o.screenshot] {
                 QWidget* shown = QApplication::activeModalWidget();
                 if (!shown)
                     shown = QApplication::activePopupWidget();
+                if (!shown) // a window that isn't modal (Hashes, MCP)
+                    shown = QApplication::activeWindow();
                 if (shown) {
                     shown->grab().save(file);
                     shown->close();

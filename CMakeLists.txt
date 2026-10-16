@@ -29,6 +29,7 @@ find_package(ZLIB REQUIRED)
 add_subdirectory(src/core)
 include(Games)          # adds src/games/<name> and the generated registry
 add_subdirectory(src/games)
+add_subdirectory(src/mcp)      # MCP server for AI assistants (26viewer-cli mcp)
 
 if(VIEWER_BUILD_CLI)
     add_subdirectory(src/cli)
